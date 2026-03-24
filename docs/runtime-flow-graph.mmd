@@ -1,0 +1,30 @@
+flowchart TD
+    A[Boot or wake from deep sleep] --> B{Wakeup reason timer?}
+    B -->|No| C[Reset sample counter]
+    B -->|Yes| D[Keep RTC DO value/counters]
+    C --> E[Init UART485 + DE/RE GPIO + NVS + Wi-Fi stack]
+    D --> E
+
+    E --> F[Start Wi-Fi APSTA]
+    F --> G{STA got IP?}
+    G -->|No, disconnect| H[Sleep short DEEP_SLEEP_MS_WIFI]
+    H --> A
+    G -->|Yes| I[Create rs485_task_manager]
+
+    I --> J[Send Modbus request frame]
+    J --> K[Read RS485 response]
+    K --> L{Valid response?}
+    L -->|No| J
+    L -->|Yes| M[Parse DO value]
+    M --> N{DO > MINDO?}
+    N -->|Yes| O[Use immediate DO]
+    N -->|No| P[Accumulate average + retry]
+    P --> Q{Retries exhausted?}
+    Q -->|No| J
+    Q -->|Yes| R[Use average DO]
+
+    O --> S[Build JSON payload]
+    R --> S
+    S --> T[HTTP POST /api/remoteLevels]
+    T --> U[Deep sleep DEEP_SLEEP_MS]
+    U --> A
