@@ -47,6 +47,8 @@
 // DO sampling and retry policy
 #define MINDO (4.5f)
 #define WAITDO (10000)
+// #define MAX485_DE GPIO_NUM_40
+// #define MAX485_RE GPIO_NUM_39
 #define MAX485_DE GPIO_NUM_14
 #define MAX485_RE GPIO_NUM_13
 #define NTW GPIO_NUM_41

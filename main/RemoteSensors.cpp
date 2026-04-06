@@ -382,7 +382,7 @@ static esp_err_t app_gpio_outputs_init(void)
 {
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask =
-        (1ULL << MAX485_DE) | (1ULL << MAX485_RE) | (1ULL << NTW) | (1ULL << GPIO_NUM_48);
+        (1ULL << MAX485_DE) | (1ULL << MAX485_RE) | (1ULL << NTW) | (1ULL << GPIO_NUM_48);      //DE,RE for RS485 and 48 for Transitor for DOSensor transitor
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
