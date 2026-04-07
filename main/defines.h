@@ -31,11 +31,13 @@
 // #define DEEP_SLEEP_MS (10000 * 2)
 #define DEEP_SLEEP_MS_WIFI (60000 * 1)
 
+#define BATMAXLEVEL (7.4f)
 // UART / RS485 transport
+// see schematics for wiring details in docs/Schematics GPIOs
 #define UART485_PORT UART_NUM_1
 #define UART485_BAUD_RATE 9600
-#define UART485_TX_PIN GPIO_NUM_42
-#define UART485_RX_PIN GPIO_NUM_2
+#define UART485_TX_PIN GPIO_NUM_18
+#define UART485_RX_PIN GPIO_NUM_17
 #ifdef SLEEP
 #define UART485_RTS_PIN UART_PIN_NO_CHANGE
 #else
@@ -49,10 +51,20 @@
 #define WAITDO (10000)
 // #define MAX485_DE GPIO_NUM_40
 // #define MAX485_RE GPIO_NUM_39
-#define MAX485_DE GPIO_NUM_14
-#define MAX485_RE GPIO_NUM_13
+#define MAX485_DE GPIO_NUM_8
+#define MAX485_RE GPIO_NUM_19
 #define NTW GPIO_NUM_41
 #define MAXRETRY_MAX485 (3)
+// GPIOs for External Power Source for 3 sensors ALL HAVE PULL DOWN 1K RESISTORS AT the Transistor Base
+#define SENSOR1 GPIO_NUM_15
+#define SENSOR2 GPIO_NUM_16
+#define SENSOR3 GPIO_NUM_7
+#define DOPOWER SENSOR1         //for compilation reasons, we will use SENSOR1 pin to power the DO sensor, but in the actual hardware we will have a separate transistor to control power to the DO sensor, so this pin will be used to control that transistor
+
+// ADC configuration
+#define BATSOC GPIO_NUM_4
+#define ADC_GPIO BATSOC
+#define ADC_VREF 3.11f  // Reference voltage in volts
 
 // Modbus frame layout
 #define MODBUS_RSP_DATA_OFFSET (3)

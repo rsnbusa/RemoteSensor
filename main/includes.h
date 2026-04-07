@@ -19,6 +19,7 @@
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "driver/uart.h"
+#include "driver/adc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "lwip/ip4_addr.h"

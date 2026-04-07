@@ -40,6 +40,7 @@ static esp_netif_t *s_ap_netif = NULL;
 static TaskHandle_t s_ap_blink_task = NULL;
 static TaskHandle_t s_web_task = NULL;
 static TaskHandle_t s_rs485_task = NULL;
+static TaskHandle_t s_adc_task = NULL;
 static bool s_ap_client_connected = false;
 static RTC_DATA_ATTR float s_do_value_rtc = 0.0f;
 static RTC_DATA_ATTR int s_count = 0;
@@ -63,6 +64,8 @@ static const char *NVS_KEY_THECONF = "theConf";
 
 #define MQTT_CONNECTED_BIT BIT0
 #define MQTT_PUBLISHED_BIT BIT1
+
+float BAT_SOC=0.0f;
 
 static EventGroupHandle_t s_mqtt_event_group = NULL;
 static int s_transport_mode = MESSAGE_TRANSPORT_HTTP;
@@ -382,7 +385,7 @@ static esp_err_t app_gpio_outputs_init(void)
 {
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask =
-        (1ULL << MAX485_DE) | (1ULL << MAX485_RE) | (1ULL << NTW) | (1ULL << GPIO_NUM_48);      //DE,RE for RS485 and 48 for Transitor for DOSensor transitor
+        (1ULL << MAX485_DE) | (1ULL << MAX485_RE) | (1ULL << NTW) | (1ULL << DOPOWER) | (1ULL << SENSOR2)| (1ULL << SENSOR3);      //DE,RE for RS485 and DOPOWER for Transitor for DOSensor transitor
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -394,10 +397,42 @@ static esp_err_t app_gpio_outputs_init(void)
 
     rtc_gpio_hold_dis((gpio_num_t)MAX485_RE);       //restore normal pin function on RE pin (allow it to be driven low for receive mode)
     rtc_gpio_hold_dis((gpio_num_t)MAX485_DE);
-    gpio_set_level(GPIO_NUM_48, 1);
+    gpio_set_level(DOPOWER, 1);      // turn ON the DO Sensor
 
     vTaskDelay(10); // Short delay to ensure DE/RE levels are stable before UART operations
     return ESP_OK;
+}
+
+static esp_err_t app_adc_init(void)
+{
+    // Configure ADC1
+    ESP_RETURN_ON_ERROR(adc1_config_width(ADC_WIDTH_BIT_12), TAG, "ADC width config failed");
+    ESP_RETURN_ON_ERROR(adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11), TAG, "ADC channel config failed");
+    
+    ESP_LOGI(TAG, "ADC initialized for GPIO4 with 3.11V reference");
+    return ESP_OK;
+}
+
+static void adc_read_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "ADC read task started");
+
+    while (1) {
+        int adc_raw = adc1_get_raw(ADC1_CHANNEL_3);
+        
+        // Convert raw ADC value to voltage
+        // For 12-bit resolution: max value is 4095
+        // For 3.11V reference: voltage = (adc_raw / 4095.0) * ADC_VREF
+        float voltage = (adc_raw / 4095.0f) * ADC_VREF;
+        float DIVIDER_RATIO = (220 + 100) / 100;        // acutally K but its not revlevatn for the calculation since we just want a relative SOC value, not the actual resistors values
+        BAT_SOC= voltage * DIVIDER_RATIO/BATMAXLEVEL; // Calculate battery voltage based on the voltage divider ratio
+
+        ESP_LOGI(TAG, "ADC GPIO4 Raw: %d, Raw Voltage: %.2f V SOC %.2f", adc_raw, voltage,BAT_SOC);
+
+        vTaskDelay(pdMS_TO_TICKS(1000000));  // Read every wake up interval once
+    }
+
+    vTaskDelete(NULL);
 }
 
 void set_tx_rs485()
@@ -418,7 +453,7 @@ void set_sleep_rs485()
 {
     gpio_set_level(MAX485_DE, 0);
     gpio_set_level(MAX485_RE, 1);
-    gpio_set_level(GPIO_NUM_48, 0);
+    gpio_set_level(DOPOWER, 0);             // Turn OFF the3 DO Sensor to save power during deep sleep
 
     ESP_ERROR_CHECK(rtc_gpio_isolate(MAX485_DE));
     ESP_ERROR_CHECK(rtc_gpio_isolate(MAX485_RE));
@@ -513,9 +548,9 @@ static float get_do_value_to_send(void)
 static bool build_telemetry_json(float do_level, char *json_out, size_t json_out_size)
 {
     int written = snprintf(json_out, json_out_size,
-                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d}]}",
+                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d SOC %.2f }]}",
                            (unsigned)theConf.poolid, (unsigned)theConf.unitid,
-                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval);
+                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC);
     // int written = snprintf(json_out, json_out_size,
     //                        "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d},\
     //                        {\"cmd\":\"DOPH\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d}]}",
@@ -1141,6 +1176,13 @@ void app_main(void)
     #ifdef SLEEP
     ESP_ERROR_CHECK(app_gpio_outputs_init());
     #endif
+
+    // Initialize ADC for GPIO4
+    ESP_ERROR_CHECK(app_adc_init());
+    
+    // Start ADC read task
+    start_task_once(&adc_read_task, "ADCRead", 2048, 4, &s_adc_task);
+    vTaskDelay(pdMS_TO_TICKS(100)); // Short delay to ensure ADC task starts and reads initial value before we use it in transport mode selection
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
