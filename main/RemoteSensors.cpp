@@ -41,6 +41,7 @@ static TaskHandle_t s_ap_blink_task = NULL;
 static TaskHandle_t s_web_task = NULL;
 static TaskHandle_t s_rs485_task = NULL;
 static TaskHandle_t s_adc_task = NULL;
+static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
 static bool s_ap_client_connected = false;
 static RTC_DATA_ATTR float s_do_value_rtc = 0.0f;
 static RTC_DATA_ATTR int s_count = 0;
@@ -405,9 +406,16 @@ static esp_err_t app_gpio_outputs_init(void)
 
 static esp_err_t app_adc_init(void)
 {
-    // Configure ADC1
-    ESP_RETURN_ON_ERROR(adc1_config_width(ADC_WIDTH_BIT_12), TAG, "ADC width config failed");
-    ESP_RETURN_ON_ERROR(adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11), TAG, "ADC channel config failed");
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit_cfg, &s_adc1_handle), TAG, "ADC unit init failed");
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc1_handle, ADC_CHANNEL_3, &chan_cfg), TAG, "ADC channel config failed");
     
     ESP_LOGI(TAG, "ADC initialized for GPIO4 with 3.11V reference");
     return ESP_OK;
@@ -418,7 +426,12 @@ static void adc_read_task(void *pvParameters)
     ESP_LOGI(TAG, "ADC read task started");
 
     while (1) {
-        int adc_raw = adc1_get_raw(ADC1_CHANNEL_3);
+        int adc_raw = 0;
+        if (adc_oneshot_read(s_adc1_handle, ADC_CHANNEL_3, &adc_raw) != ESP_OK) {
+            ESP_LOGW(TAG, "ADC read failed");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
         
         // Convert raw ADC value to voltage
         // For 12-bit resolution: max value is 4095
