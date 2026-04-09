@@ -45,6 +45,7 @@
 #define CONN_OTA 'O'
 #define CONN_FILE_UPLOAD 'F'
 #define CONN_ACTION 'A'
+#define CONN_WEBSOCKET 'W'
 #define CONN_HANDLED 'Z'
 
 typedef void (*data_func_t)(void *);
@@ -59,6 +60,8 @@ typedef void (*custom_reply_func_t)(struct mg_connection *,
                                     struct mg_http_message *);
 typedef size_t (*file_read_func_t)(char *, size_t, void *, size_t);
 typedef bool (*file_write_func_t)(char *, size_t, void *, size_t);
+typedef void (*websocket_onmessage_func_t)(struct mg_connection *, const char *,
+                                           size_t);
 
 struct mg_mgr g_mgr;  // Mongoose event manager
 
@@ -83,6 +86,11 @@ struct apihandler {
   int read_level;
   int write_level;
   unsigned long version;
+};
+
+struct apihandler_websocket {
+  struct apihandler common;
+  websocket_onmessage_func_t onmessage;
 };
 
 struct apihandler_custom {
@@ -140,6 +148,11 @@ struct file_state {
   struct apihandler_file *h;
 };
 
+struct websocket_state {
+  char marker;
+  struct apihandler_websocket *h;
+};
+
 struct custom_api_handler {
   struct custom_api_handler *next;
   struct mg_str url_pattern;
@@ -168,6 +181,7 @@ struct attribute s_Sensors_attributes[] = {
   {"PH", "bool", NULL, offsetof(struct Sensors, PH), 0, false},
   {"Sal", "bool", NULL, offsetof(struct Sensors, Sal), 0, false},
   {"IR", "bool", NULL, offsetof(struct Sensors, IR), 0, false},
+  {"batVolts", "double", NULL, offsetof(struct Sensors, batVolts), 0, false},
   {NULL, NULL, NULL, 0, 0, false}
 };
 
@@ -234,6 +248,9 @@ void mongoose_set_http_handlers(const char *name, ...) {
     ((struct apihandler_ota *) h)->writer = va_arg(ap, ota_write_func_t);
   } else if (strcmp(h->type, "custom") == 0) {
     ((struct apihandler_custom *) h)->reply = va_arg(ap, custom_reply_func_t);
+  } else if (strcmp(h->type, "websocket") == 0) {
+    ((struct apihandler_websocket *) h)->onmessage =
+        va_arg(ap, websocket_onmessage_func_t);
   } else {
     MG_ERROR(("Setting [%s] failed: not implemented", name));
   }
@@ -619,6 +636,11 @@ static void handle_api_call(struct mg_connection *c, struct mg_http_message *hm,
     handle_file(c, hm, (struct apihandler_file *) h);
   } else if (strcmp(h->type, "custom") == 0) {
     ((struct apihandler_custom *) h)->reply(c, hm);
+  } else if (strcmp(h->type, "websocket") == 0) {
+    struct websocket_state *s = (struct websocket_state *) c->data;
+    s->marker = CONN_WEBSOCKET;
+    s->h = (struct apihandler_websocket *) h;
+    mg_ws_upgrade(c, hm, NULL);
   } else {
     mg_http_reply(c, 500, JSON_HEADERS, "API type %s unknown\n", h->type);
   }
@@ -722,13 +744,18 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
       opts.root_dir = "/web_root/";
       opts.fs = &mg_fs_packed;
       opts.extra_headers = NO_CACHE_HEADERS;
+      mg_mem_files = mg_packed_files;
       mg_http_serve_dir(c, hm, &opts);
 #else
       mg_http_reply(c, 200, "", ":)\n");
 #endif  // WIZARD_ENABLE_HTTP_UI
     }
   } else if (ev == MG_EV_WS_MSG || ev == MG_EV_WS_CTL) {
-    // Ignore received data
+    struct websocket_state *s = (struct websocket_state *) c->data;
+    if (ev == MG_EV_WS_MSG && s->marker == CONN_WEBSOCKET && s->h) {
+      struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
+      if (s->h->onmessage) s->h->onmessage(c, wm->data.buf, wm->data.len);
+    }
   } else if (ev == MG_EV_ACCEPT) {
     if (c->fn_data != NULL) {  // TLS listener
       struct mg_tls_opts opts;
@@ -762,6 +789,26 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
       c->is_resp = 0;
     }
   }
+}
+
+int mongoose_ws_printf(const char *api_name, const char *fmt, ...) {
+  struct apihandler_websocket *h =
+      (struct apihandler_websocket *) get_api_handler(mg_str(api_name));
+  int result = 0;
+  va_list ap;
+  if (h != NULL) {
+    struct mg_connection *c;
+    for (c = g_mgr.conns; c != NULL; c = c->next) {
+      struct websocket_state *s = (struct websocket_state *) c->data;
+      if (s->marker == CONN_WEBSOCKET && s->h == h) {
+        va_start(ap, fmt);
+        mg_ws_vprintf(c, WEBSOCKET_OP_TEXT, fmt, &ap);
+        va_end(ap);
+        result++;
+      }
+    }
+  }
+  return result;
 }
 
 #if WIZARD_ENABLE_WEBSOCKET
@@ -950,93 +997,17 @@ void mongoose_set_mqtt_handlers(struct mongoose_mqtt_handlers *h) {
 #endif  // WIZARD_ENABLE_MQTT
 
 #if WIZARD_ENABLE_MODBUS
-static struct mongoose_modbus_handlers s_modbus_handlers = {
-    glue_modbus_read_reg, glue_modbus_write_reg};
+static void (*s_modbus_fn)(struct mg_modbus_req *);
 
-static void handle_modbus_pdu(struct mg_connection *c, uint8_t *buf,
-                              size_t len) {
-  MG_DEBUG(("Received PDU %p len %lu, hexdump:", buf, len));
-  if (mg_log_level >= MG_LL_VERBOSE) mg_hexdump(buf, len);
-  // size_t hdr_size = 8, max_data_size = sizeof(response) - hdr_size;
-  if (len < 12) {
-    MG_ERROR(("PDU too small"));
-  } else {
-    uint8_t func = buf[7];  // Function
-    bool success = false;
-    size_t response_len = 0;
-    uint8_t response[260];
-    memcpy(response, buf, 8);
-    // uint16_t tid = mg_ntohs(*(uint16_t *) &buf[0]);  // Transaction ID
-    // uint16_t pid = mg_ntohs(*(uint16_t *) &buf[0]);  // Protocol ID
-    // uint16_t len = mg_ntohs(*(uint16_t *) &buf[4]);  // PDU length
-    // uint8_t uid = buf[6];                            // Unit identifier
-    if (func == 6) {  // write single holding register
-      uint16_t start = mg_ntohs(*(uint16_t *) &buf[8]);
-      uint16_t value = mg_ntohs(*(uint16_t *) &buf[10]);
-      success = s_modbus_handlers.write_reg_fn(start, value);
-      *(uint16_t *) &response[8] = mg_htons(start);
-      *(uint16_t *) &response[10] = mg_htons(value);
-      response_len = 12;
-      MG_DEBUG(("Glue returned %s", success ? "success" : "failure"));
-    } else if (func == 16) {  // Write multiple
-      uint16_t start = mg_ntohs(*(uint16_t *) &buf[8]);
-      uint16_t num = mg_ntohs(*(uint16_t *) &buf[10]);
-      uint16_t i, *data = (uint16_t *) &buf[13];
-      if ((size_t) (num * 2 + 10) < sizeof(response)) {
-        for (i = 0; i < num; i++) {
-          success = s_modbus_handlers.write_reg_fn((uint16_t) (start + i),
-                                                   mg_htons(data[i]));
-          if (success == false) break;
-        }
-        *(uint16_t *) &response[8] = mg_htons(start);
-        *(uint16_t *) &response[10] = mg_htons(num);
-        response_len = 12;
-        MG_DEBUG(("Glue returned %s", success ? "success" : "failure"));
-      }
-    } else if (func == 3 || func == 4) {  // Read multiple
-      uint16_t start = mg_ntohs(*(uint16_t *) &buf[8]);
-      uint16_t num = mg_ntohs(*(uint16_t *) &buf[10]);
-      if ((size_t) (num * 2 + 9) < sizeof(response)) {
-        uint16_t i, val, *data = (uint16_t *) &response[9];
-        for (i = 0; i < num; i++) {
-          success = s_modbus_handlers.read_reg_fn((uint16_t) (start + i), &val);
-          if (success == false) break;
-          data[i] = mg_htons(val);
-        }
-        response[8] = (uint8_t) (num * 2);
-        response_len = 9 + response[8];
-        MG_DEBUG(("Glue returned %s", success ? "success" : "failure"));
-      }
-    }
-    if (success == false) {
-      response_len = 9;
-      response[7] |= 0x80;
-      response[8] = 4;  // Server Device Failure
-    }
-    *(uint16_t *) &response[4] = mg_htons((uint16_t) (response_len - 6));
-    MG_DEBUG(("Sending PDU response %lu:", response_len));
-    if (mg_log_level >= MG_LL_VERBOSE) mg_hexdump(response, response_len);
-    mg_send(c, response, response_len);
-  }
+void mongoose_set_modbus_handler(void (*fn)(struct mg_modbus_req *req)) {
+  s_modbus_fn = fn;
 }
 
 static void modbus_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
-  // if (ev == MG_EV_OPEN) c->is_hexdumping = 1;
-  if (ev == MG_EV_READ) {
-    uint16_t len;
-    if (c->recv.len < 7) return;  // Less than minimum length, buffer more
-    len = mg_ntohs(*(uint16_t *) &c->recv.buf[4]);  // PDU length
-    MG_INFO(("Got %lu, expecting %lu", c->recv.len, len + 6));
-    if (c->recv.len < len + 6U) return;          // Partial frame, buffer more
-    handle_modbus_pdu(c, c->recv.buf, len + 6);  // Parse PDU and call user
-    mg_iobuf_del(&c->recv, 0, len + 6U);         // Delete received PDU
+  if (ev == MG_EV_MODBUS_REQ) {
+    if (s_modbus_fn) s_modbus_fn((struct mg_modbus_req *) ev_data);
   }
-  (void) ev_data;
-}
-
-void mongoose_set_modbus_handlers(struct mongoose_modbus_handlers *h) {
-  if (h->read_reg_fn) s_modbus_handlers.read_reg_fn = h->read_reg_fn;
-  if (h->write_reg_fn) s_modbus_handlers.write_reg_fn = h->write_reg_fn;
+  (void) c;
 }
 #endif  // WIZARD_ENABLE_MODBUS
 
@@ -1168,7 +1139,7 @@ void mongoose_init(void) {
     char url[100];
     mg_snprintf(url, sizeof(url), "tcp://0.0.0.0:%d", WIZARD_MODBUS_PORT);
     MG_INFO(("Starting Modbus-TCP server on port %d", WIZARD_MODBUS_PORT));
-    mg_listen(&g_mgr, url, modbus_ev_handler, NULL);
+    mg_modbus_listen(&g_mgr, url, modbus_ev_handler, NULL);
   }
 #endif
 
@@ -1186,9 +1157,26 @@ void mongoose_init(void) {
   MG_INFO(("Mongoose init complete"));
 }
 
+// OTA via periodic URL check
+static struct mongoose_ota_settings s_ota_settings;
+static uint64_t s_ota_timer;
+
+void mongoose_enable_ota_url_checks(struct mongoose_ota_settings *settings) {
+  s_ota_settings = *settings;
+}
+
+static void check_firmware_version_url(void) {
+  // Implement OTA via URL check
+}
+
 void mongoose_poll(void) {
   glue_lock();
   mg_mgr_poll(&g_mgr, 10);
+  if (s_ota_settings.interval_seconds > 0 &&
+      mg_timer_expired(&s_ota_timer, s_ota_settings.interval_seconds * 1000,
+                       mg_now())) {
+    check_firmware_version_url();
+  }
 #if WIZARD_ENABLE_WEBSOCKET
   send_websocket_data();
 #endif

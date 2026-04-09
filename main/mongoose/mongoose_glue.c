@@ -5,8 +5,8 @@
 // Default mock implementation of the API callbacks
 
 #include "mongoose_glue.h"
-// Do not edit! See https://mongoose.ws/documentation/#overriding-default-glue-callbacks
-struct Sensors s_Sensors = {"", "", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 10, 3, true, false, false, false};
+// Do not edit! See https://mongoose.ws/docs/guides/web-ui-builder/#custom-api-handlers
+struct Sensors s_Sensors = {"", "", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 10, 3, true, false, false, false, 8.4};
 void glue_get_Sensors(struct Sensors *data) {
   *data = s_Sensors;  // Sync with your device
 }
@@ -14,8 +14,8 @@ void glue_set_Sensors(struct Sensors *data) {
   s_Sensors = *data; // Sync with your device
 }
 
-// Do not edit! See https://mongoose.ws/documentation/#overriding-default-glue-callbacks
-static uint64_t s_action_timeout_save_event;  // Time when save_event ends
+// Do not edit! See https://mongoose.ws/docs/guides/web-ui-builder/#custom-api-handlers
+uint64_t s_action_timeout_save_event;  // Time when save_event ends
 bool glue_check_save_event(void) {
   return s_action_timeout_save_event > mg_now(); // Return true if save_event is in progress
 }

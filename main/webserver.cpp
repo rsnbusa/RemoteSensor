@@ -73,6 +73,7 @@ void my_get_Sensors(struct Sensors *data)
 	data->PHLevel=theConf.PHLevel;
 	data->DOLevel=theConf.DOLevel;
 	data->WTemp=theConf.WTemp;
+	data->batVolts=theConf.batVolts;
 	data->conntype=theConf.conntype;	// printf("Settings requested: pool=%u unit=%u interval=%u retry=%u DO=%d PH=%d Sal=%d IR=%d\n",
 	copy_bounded(data->mqttssid, sizeof(data->mqttssid), theConf.sta_ssid);
 	copy_bounded(data->mqttpassw, sizeof(data->mqttpassw), theConf.sta_pass);
@@ -99,6 +100,7 @@ void my_set_Sensors(struct Sensors *data) {
 	theConf.SalinitySensor = data->Sal;
 	theConf.IRsensor = data->IR;
 	theConf.conntype=data->conntype;
+	theConf.batVolts=data->batVolts;
 	copy_bounded(theConf.sta_ssid, sizeof(theConf.sta_ssid), data->mqttssid);
 	copy_bounded(theConf.sta_pass, sizeof(theConf.sta_pass), data->mqttpassw);
 	// printf("Settings updated: pool=%u unit=%u interval=%u retry=%u DO=%d PH=%d Sal=%d IR=%d\n",

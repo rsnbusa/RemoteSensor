@@ -13,7 +13,8 @@ struct theConf theConf= {
     .DOSensor = true,
     .PHSensor = true,
     .SalinitySensor = true,
-    .IRsensor = true
+    .IRsensor = true,
+    .batVolts=8.4
 };
 
 static const struct theConf kDefaultConf = {
@@ -28,6 +29,7 @@ static const struct theConf kDefaultConf = {
     .PHSensor = true,
     .SalinitySensor = true,
     .IRsensor = true,
+    .batVolts=8.4,
     .sentinel = 0xDEADBEEF,
 };
 char STA_SSID[40],AP_SSID[40];
@@ -67,6 +69,7 @@ static const char *NVS_KEY_THECONF = "theConf";
 #define MQTT_PUBLISHED_BIT BIT1
 
 float BAT_SOC=0.0f;
+float BAT_VOLTS=0;
 
 static EventGroupHandle_t s_mqtt_event_group = NULL;
 static int s_transport_mode = MESSAGE_TRANSPORT_HTTP;
@@ -437,10 +440,11 @@ static void adc_read_task(void *pvParameters)
         // For 12-bit resolution: max value is 4095
         // For 3.11V reference: voltage = (adc_raw / 4095.0) * ADC_VREF
         float voltage = (adc_raw / 4095.0f) * ADC_VREF;
-        float DIVIDER_RATIO = (220 + 100) / 100;        // acutally K but its not revlevatn for the calculation since we just want a relative SOC value, not the actual resistors values
-        BAT_SOC= voltage * DIVIDER_RATIO/BATMAXLEVEL; // Calculate battery voltage based on the voltage divider ratio
+        BAT_VOLTS=voltage;
+        float DIVIDER_RATIO = (RESISTOR1 + RESISTOR2) / RESISTOR2;        // acutally K but its not revlevatn for the calculation since we just want a relative SOC value, not the actual resistors values
+        BAT_SOC= voltage * DIVIDER_RATIO/theConf.batVolts; // Calculate battery voltage based on the voltage divider ratio
 
-        ESP_LOGI(TAG, "ADC GPIO4 Raw: %d, Raw Voltage: %.2f V SOC %.2f", adc_raw, voltage,BAT_SOC);
+        ESP_LOGI(TAG, "ADC GPIO4 Raw: %d, Raw Voltage: %.2f V Ratio %.2f SOC %.2f%%", adc_raw, voltage,DIVIDER_RATIO,BAT_SOC);
 
         vTaskDelay(pdMS_TO_TICKS(1000000));  // Read every wake up interval once
     }
@@ -561,9 +565,9 @@ static float get_do_value_to_send(void)
 static bool build_telemetry_json(float do_level, char *json_out, size_t json_out_size)
 {
     int written = snprintf(json_out, json_out_size,
-                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d SOC %.2f }]}",
+                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f}]}",
                            (unsigned)theConf.poolid, (unsigned)theConf.unitid,
-                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC);
+                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC,BAT_VOLTS);
     // int written = snprintf(json_out, json_out_size,
     //                        "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d},\
     //                        {\"cmd\":\"DOPH\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d}]}",
@@ -961,6 +965,7 @@ static void collect_do_sample_until_ready(void)
     uint8_t rs485_response[UART485_RX_BUF_SIZE] = {0};
     int retries = 0;
     int rs485_response_len = 0;
+    int vanerr=0;
 
     while (true) {
         esp_err_t rs485_err = rs485_send_read_do_request(rs485_response, sizeof(rs485_response), &rs485_response_len);
@@ -987,6 +992,13 @@ static void collect_do_sample_until_ready(void)
         } else {
             ESP_LOGE(TAG, "RS485 request failed: %s %d", esp_err_to_name(rs485_err), rs485_response_len);
             vTaskDelay(pdMS_TO_TICKS(1000)); // Short delay before retrying
+            vanerr++;
+            if(vanerr>MAXRETRY_MAX485)
+            {
+                    ESP_LOGE(TAG, "RS485 request retries exhausted");
+                    s_do_value_rtc=-1.0;
+                    break;   
+            }
         }
     }
 }

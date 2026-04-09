@@ -67,13 +67,6 @@ struct mongoose_mqtt_handlers {
   void (*on_cmd_fn)(struct mg_connection *, struct mg_mqtt_message *);
 };
 void mongoose_set_mqtt_handlers(struct mongoose_mqtt_handlers *);
-
-struct mongoose_modbus_handlers {
-  bool (*read_reg_fn)(uint16_t address, uint16_t *value);
-  bool (*write_reg_fn)(uint16_t address, uint16_t value);
-};
-void mongoose_set_modbus_handlers(struct mongoose_modbus_handlers *);
-
 void mongoose_set_sntp_handler(void (*fn)(uint64_t epoch_ms));
 void mongoose_set_sntp_server(const char *url);
 
@@ -86,10 +79,21 @@ struct mongoose_wifi_handlers {
   void (*on_connect_fn)(struct mg_tcpip_if *);
   void (*on_disconnect_fn)(struct mg_tcpip_if *);
   void (*on_connect_error_fn)(struct mg_tcpip_if *);
-  void (*on_scan_result_fn)(struct mg_tcpip_if *, struct mg_wifi_scan_bss_data *);
+  void (*on_scan_result_fn)(struct mg_tcpip_if *,
+                            struct mg_wifi_scan_bss_data *);
   void (*on_scan_end_fn)(struct mg_tcpip_if *);
 };
 void mongoose_set_wifi_handlers(struct mongoose_wifi_handlers *);
+
+struct mongoose_ota_settings {
+  const char *current_version;
+  const char *version_url;
+  const char *firmware_url;
+  int interval_seconds;
+  char *status_buffer;
+  size_t status_buffer_size;
+};
+void mongoose_enable_ota_url_checks(struct mongoose_ota_settings *settings);
 
 #if WIZARD_ENABLE_MQTT
 void glue_lock_init(void);  // Initialise global Mongoose mutex
@@ -100,6 +104,9 @@ void glue_unlock(void);     // Unlock global Mongoose mutex
 #define glue_lock()
 #define glue_unlock()
 #endif
+
+// Send a message to the websocket API connections, return number of connections
+int mongoose_ws_printf(const char *api_name, const char *fmt, ...);
 
 // Update MDNS name. Works when MDNS is enabled.
 void glue_mdns_update_name(const char *newname);
@@ -128,6 +135,7 @@ struct Sensors {
   bool PH;
   bool Sal;
   bool IR;
+  double batVolts;
 };
 void glue_get_Sensors(struct Sensors *);
 void glue_set_Sensors(struct Sensors *);
