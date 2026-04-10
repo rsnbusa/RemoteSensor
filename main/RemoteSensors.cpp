@@ -44,6 +44,8 @@ static TaskHandle_t s_web_task = NULL;
 static TaskHandle_t s_rs485_task = NULL;
 static TaskHandle_t s_adc_task = NULL;
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
+static adc_cali_handle_t s_adc1_cali_handle = NULL;
+static bool s_adc1_cali_enabled = false;
 static bool s_ap_client_connected = false;
 static RTC_DATA_ATTR float s_do_value_rtc = 0.0f;
 static RTC_DATA_ATTR int s_count = 0;
@@ -70,6 +72,7 @@ static const char *NVS_KEY_THECONF = "theConf";
 
 float BAT_SOC=0.0f;
 float BAT_VOLTS=0;
+int adc_raw=0;
 
 static EventGroupHandle_t s_mqtt_event_group = NULL;
 static int s_transport_mode = MESSAGE_TRANSPORT_HTTP;
@@ -407,20 +410,64 @@ static esp_err_t app_gpio_outputs_init(void)
     return ESP_OK;
 }
 
+static bool app_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten,
+                                     adc_cali_handle_t *out_handle)
+{
+    if (out_handle == NULL) {
+        return false;
+    }
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_cfg = {
+        .unit_id = unit,
+        .chan = channel,
+        .atten = atten,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, out_handle) == ESP_OK) {
+        return true;
+    }
+#endif
+
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t cali_cfg = {
+        .unit_id = unit,
+        .atten = atten,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    if (adc_cali_create_scheme_line_fitting(&cali_cfg, out_handle) == ESP_OK) {
+        return true;
+    }
+#endif
+
+    return false;
+}
+
 static esp_err_t app_adc_init(void)
 {
+    // Configure GPIO1 as input with no pull-ups/pull-downs
+    gpio_config_t adc_gpio_conf = {};
+    adc_gpio_conf.pin_bit_mask = (1ULL << ADC_GPIO);
+    adc_gpio_conf.mode = GPIO_MODE_INPUT;
+    adc_gpio_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    adc_gpio_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    adc_gpio_conf.intr_type = GPIO_INTR_DISABLE;
+    ESP_RETURN_ON_ERROR(gpio_config(&adc_gpio_conf), TAG, "ADC GPIO config failed");
+
     adc_oneshot_unit_init_cfg_t unit_cfg = {
         .unit_id = ADC_UNIT_1,
     };
     ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit_cfg, &s_adc1_handle), TAG, "ADC unit init failed");
 
     adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN_DB_12,
+        .atten = ADC_ATTEN_DB_0,
         .bitwidth = ADC_BITWIDTH_12,
     };
-    ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc1_handle, ADC_CHANNEL_3, &chan_cfg), TAG, "ADC channel config failed");
+    ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc1_handle, ADC_CHANNEL_0, &chan_cfg), TAG, "ADC channel config failed");
+
+    s_adc1_cali_enabled = app_adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_0, ADC_ATTEN_DB_0, &s_adc1_cali_handle);
     
-    ESP_LOGI(TAG, "ADC initialized for GPIO4 with 3.11V reference");
+    ESP_LOGI(TAG, "ADC initialized for GPIO1 with calibration %s", s_adc1_cali_enabled ? "enabled" : "disabled");
     return ESP_OK;
 }
 
@@ -429,22 +476,39 @@ static void adc_read_task(void *pvParameters)
     ESP_LOGI(TAG, "ADC read task started");
 
     while (1) {
-        int adc_raw = 0;
-        if (adc_oneshot_read(s_adc1_handle, ADC_CHANNEL_3, &adc_raw) != ESP_OK) {
+        adc_raw = 0;
+        if (adc_oneshot_read(s_adc1_handle, ADC_CHANNEL_0, &adc_raw) != ESP_OK) { //gpio1
             ESP_LOGW(TAG, "ADC read failed");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
         
-        // Convert raw ADC value to voltage
-        // For 12-bit resolution: max value is 4095
-        // For 3.11V reference: voltage = (adc_raw / 4095.0) * ADC_VREF
-        float voltage = (adc_raw / 4095.0f) * ADC_VREF;
-        BAT_VOLTS=voltage;
-        float DIVIDER_RATIO = (RESISTOR1 + RESISTOR2) / RESISTOR2;        // acutally K but its not revlevatn for the calculation since we just want a relative SOC value, not the actual resistors values
-        BAT_SOC= voltage * DIVIDER_RATIO/theConf.batVolts; // Calculate battery voltage based on the voltage divider ratio
+        // Convert the ADC reading back to pin voltage, then reconstruct battery voltage.
+        float adc_pin_voltage = 0.0f;
+        if (s_adc1_cali_enabled) {
+            int adc_mv = 0;
+            if (adc_cali_raw_to_voltage(s_adc1_cali_handle, adc_raw, &adc_mv) == ESP_OK) {
+                adc_pin_voltage = adc_mv / 1000.0f;
+            } else {
+                adc_pin_voltage = (adc_raw / 4095.0f) * ADC_VREF;
+            }
+        } else {
+            adc_pin_voltage = (adc_raw / 4095.0f) * ADC_VREF;
+        }
 
-        ESP_LOGI(TAG, "ADC GPIO4 Raw: %d, Raw Voltage: %.2f V Ratio %.2f SOC %.2f%%", adc_raw, voltage,DIVIDER_RATIO,BAT_SOC);
+        float divider_ratio = (RESISTOR1 + RESISTOR2) / RESISTOR2;
+        float battery_voltage = adc_pin_voltage * divider_ratio;
+
+        BAT_VOLTS = battery_voltage;
+        BAT_SOC = (battery_voltage / theConf.batVolts) * 100.0f;
+        if (BAT_SOC < 0.0f) {
+            BAT_SOC = 0.0f;
+        } else if (BAT_SOC > 100.0f) {
+            BAT_SOC = 100.0f;
+        }
+
+        ESP_LOGI(TAG, "ADC GPIO1 Raw: %d, Pin Voltage: %.2f V Battery: %.2f V Ratio %.2f SOC %.2f%%",
+                 adc_raw, adc_pin_voltage, battery_voltage, divider_ratio, BAT_SOC);
 
         vTaskDelay(pdMS_TO_TICKS(1000000));  // Read every wake up interval once
     }
@@ -565,9 +629,9 @@ static float get_do_value_to_send(void)
 static bool build_telemetry_json(float do_level, char *json_out, size_t json_out_size)
 {
     int written = snprintf(json_out, json_out_size,
-                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f}]}",
+                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f,\"Raw\":%d}]}",
                            (unsigned)theConf.poolid, (unsigned)theConf.unitid,
-                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC,BAT_VOLTS);
+                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC,BAT_VOLTS, adc_raw);
     // int written = snprintf(json_out, json_out_size,
     //                        "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d},\
     //                        {\"cmd\":\"DOPH\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d}]}",

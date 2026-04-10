@@ -49,8 +49,8 @@
 #define UART485_RX_BUF_SIZE 256
 
 // voltage divider Resistors for 8.4  bat expected level
-#define RESISTOR1 (15000.0f)
-#define RESISTOR2 (10000.0f)
+#define RESISTOR1 (22000.0f)
+#define RESISTOR2 (3300.0f)
 // DO sampling and retry policy
 #define MINDO (4.5f)
 #define WAITDO (10000)
@@ -68,9 +68,9 @@
 #define DOPOWER SENSOR1         //for compilation reasons, we will use SENSOR1 pin to power the DO sensor, but in the actual hardware we will have a separate transistor to control power to the DO sensor, so this pin will be used to control that transistor
 
 // ADC configuration
-#define BATSOC GPIO_NUM_4
+#define BATSOC GPIO_NUM_1
 #define ADC_GPIO BATSOC
-#define ADC_VREF 3.11f  // Reference voltage in volts
+#define ADC_VREF 1.1f  // Reference voltage in volts
 
 // Modbus frame layout
 #define MODBUS_RSP_DATA_OFFSET (3)
