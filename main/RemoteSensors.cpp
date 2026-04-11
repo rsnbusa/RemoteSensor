@@ -46,6 +46,7 @@ static TaskHandle_t s_adc_task = NULL;
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
 static adc_cali_handle_t s_adc1_cali_handle = NULL;
 static bool s_adc1_cali_enabled = false;
+static const adc_atten_t s_adc_atten = ADC_ATTEN_DB_2_5;
 static bool s_ap_client_connected = false;
 static RTC_DATA_ATTR float s_do_value_rtc = 0.0f;
 static RTC_DATA_ATTR int s_count = 0;
@@ -73,6 +74,7 @@ static const char *NVS_KEY_THECONF = "theConf";
 float BAT_SOC=0.0f;
 float BAT_VOLTS=0;
 int adc_raw=0;
+bool criticalf=false;
 
 static EventGroupHandle_t s_mqtt_event_group = NULL;
 static int s_transport_mode = MESSAGE_TRANSPORT_HTTP;
@@ -460,12 +462,12 @@ static esp_err_t app_adc_init(void)
     ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit_cfg, &s_adc1_handle), TAG, "ADC unit init failed");
 
     adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN_DB_0,
+        .atten = s_adc_atten,
         .bitwidth = ADC_BITWIDTH_12,
     };
     ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc1_handle, ADC_CHANNEL_0, &chan_cfg), TAG, "ADC channel config failed");
 
-    s_adc1_cali_enabled = app_adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_0, ADC_ATTEN_DB_0, &s_adc1_cali_handle);
+    s_adc1_cali_enabled = app_adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_0, s_adc_atten, &s_adc1_cali_handle);
     
     ESP_LOGI(TAG, "ADC initialized for GPIO1 with calibration %s", s_adc1_cali_enabled ? "enabled" : "disabled");
     return ESP_OK;
@@ -497,7 +499,7 @@ static void adc_read_task(void *pvParameters)
         }
 
         float divider_ratio = (RESISTOR1 + RESISTOR2) / RESISTOR2;
-        float battery_voltage = adc_pin_voltage * divider_ratio;
+        float battery_voltage = adc_pin_voltage * divider_ratio * BATTERY_CAL_FACTOR;
 
         BAT_VOLTS = battery_voltage;
         BAT_SOC = (battery_voltage / theConf.batVolts) * 100.0f;
@@ -507,9 +509,14 @@ static void adc_read_task(void *pvParameters)
             BAT_SOC = 100.0f;
         }
 
-        ESP_LOGI(TAG, "ADC GPIO1 Raw: %d, Pin Voltage: %.2f V Battery: %.2f V Ratio %.2f SOC %.2f%%",
-                 adc_raw, adc_pin_voltage, battery_voltage, divider_ratio, BAT_SOC);
+        ESP_LOGI(TAG, "ADC GPIO1 Raw: %d, Pin Voltage: %.2f V Battery: %.2f V Ratio %.2f Cal %.3f SOC %.2f%%",
+                 adc_raw, adc_pin_voltage, battery_voltage, divider_ratio, BATTERY_CAL_FACTOR, BAT_SOC);
 
+        // check for rnage for potential mqtt warning
+        if (battery_voltage < LOW_BATTERY_THRESHOLD) {
+            ESP_LOGW(TAG, "Battery voltage %.2f V is below low threshold %.2f V", battery_voltage, LOW_BATTERY_THRESHOLD);
+            criticalf=true;
+        }
         vTaskDelay(pdMS_TO_TICKS(1000000));  // Read every wake up interval once
     }
 

@@ -71,7 +71,8 @@
 #define BATSOC GPIO_NUM_1
 #define ADC_GPIO BATSOC
 #define ADC_VREF 1.1f  // Reference voltage in volts
-
+#define BATTERY_CAL_FACTOR 1.034f
+#define LOW_BATTERY_THRESHOLD (6.8f)
 // Modbus frame layout
 #define MODBUS_RSP_DATA_OFFSET (3)
 #define MODBUS_RSP_DATA_LEN (12)
