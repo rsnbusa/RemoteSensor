@@ -8,4 +8,4 @@ idf_component_register(
 	REQUIRES nvs_flash esp_netif esp_event esp_wifi esp_http_client esp_driver_gpio esp_driver_uart esp_adc app_update esp_timer
 )
 
-target_compile_definitions(${COMPONENT_LIB} PRIVATE MG_ENABLE_LOG=0)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE MG_ENABLE_LOG=0 DEBUG)

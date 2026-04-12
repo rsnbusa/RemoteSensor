@@ -117,6 +117,7 @@ void glue_update_state(void);
 // Firmware Glue
 
 struct Sensors {
+  double batLowLevel;
   char mqttpassw[12];
   char mqttssid[60];
   bool conntype;

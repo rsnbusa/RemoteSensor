@@ -24,6 +24,7 @@ struct theConf {
     bool SalinitySensor;
     bool IRsensor;
     float batVolts;
+    float batLowLevel;
     uint32_t sentinel;
 };
 

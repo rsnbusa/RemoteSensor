@@ -3,7 +3,7 @@
 
 // Feature toggles
 #define SLEEP
-
+#define DEBUG 
 // Wi-Fi credentials and mode
 // #define STA_SSID "shrimp-p-001-u-01"
 #define STA_PASS "csttpstt" // password
@@ -72,7 +72,7 @@
 #define ADC_GPIO BATSOC
 #define ADC_VREF 1.1f  // Reference voltage in volts
 #define BATTERY_CAL_FACTOR 1.034f
-#define LOW_BATTERY_THRESHOLD (6.8f)
+#define LOW_BATTERY_THRESHOLD (6.4f)
 // Modbus frame layout
 #define MODBUS_RSP_DATA_OFFSET (3)
 #define MODBUS_RSP_DATA_LEN (12)

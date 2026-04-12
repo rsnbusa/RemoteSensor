@@ -6,7 +6,7 @@
 
 #include "mongoose_glue.h"
 // Do not edit! See https://mongoose.ws/docs/guides/web-ui-builder/#custom-api-handlers
-struct Sensors s_Sensors = {"", "", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 10, 3, true, false, false, false, 8.4};
+struct Sensors s_Sensors = {6.8, "", "", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 10, 3, true, false, false, false, 8.4};
 void glue_get_Sensors(struct Sensors *data) {
   *data = s_Sensors;  // Sync with your device
 }

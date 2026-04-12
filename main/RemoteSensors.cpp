@@ -14,7 +14,8 @@ struct theConf theConf= {
     .PHSensor = true,
     .SalinitySensor = true,
     .IRsensor = true,
-    .batVolts=8.4
+    .batVolts=8.4,
+    .batLowLevel = LOW_BATTERY_THRESHOLD
 };
 
 static const struct theConf kDefaultConf = {
@@ -30,6 +31,7 @@ static const struct theConf kDefaultConf = {
     .SalinitySensor = true,
     .IRsensor = true,
     .batVolts=8.4,
+    .batLowLevel = LOW_BATTERY_THRESHOLD,
     .sentinel = 0xDEADBEEF,
 };
 char STA_SSID[40],AP_SSID[40];
@@ -274,7 +276,7 @@ esp_err_t save_theconf_to_nvs(void)
         return err;
     }
 
-    // ESP_LOGI(TAG, "Saved theConf to NVS");
+    ESP_LOGI(TAG, "Saved theConf to NVS");
     return ESP_OK;
 }
 
@@ -312,10 +314,10 @@ static esp_err_t load_theconf_from_nvs(void)
         ESP_LOGW(TAG, "theConf sentinel mismatch (0x%08X), resetting defaults", theConf.sentinel);
         return force_default_config_mode_and_save();
     }   
-    // ESP_LOGI(TAG,
-    //          "Loaded theConf: DO=%d PH=%d SAL=%d IR=%d pool=%u unit=%u interval=%u retry=%u",
-    //          theConf.DOSensor, theConf.PHSensor, theConf.SalinitySensor, theConf.IRsensor,
-    //          theConf.poolid, theConf.unitid, theConf.interval, theConf.retry);
+    ESP_LOGI(TAG,
+             "Loaded theConf: DO=%d PH=%d SAL=%d IR=%d pool=%u unit=%u interval=%u retry=%u",
+             theConf.DOSensor, theConf.PHSensor, theConf.SalinitySensor, theConf.IRsensor,
+             theConf.poolid, theConf.unitid, theConf.interval, theConf.retry);
     return ESP_OK;
 }
 
@@ -386,7 +388,7 @@ static esp_err_t uart485_init(void)
     ESP_RETURN_ON_ERROR(uart_set_pin(UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN, UART485_CTS_PIN), TAG, "uart_set_pin failed");
     ESP_RETURN_ON_ERROR(uart_set_mode(UART485_PORT, UART_MODE_RS485_HALF_DUPLEX), TAG, "uart_set_mode failed");
 
-    // ESP_LOGI(TAG, "UART485 RTU ready on UART%d (8E1, TX=%d RX=%d RTS=%d)", UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN);
+    ESP_LOGI(TAG, "UART485 RTU ready on UART%d (8E1, TX=%d RX=%d RTS=%d)", UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN);
     return ESP_OK;
 }
 
@@ -402,7 +404,7 @@ static esp_err_t app_gpio_outputs_init(void)
 
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "gpio_config failed");
 
-    // ESP_LOGI(TAG, "Configured MAX485 pins: DE=%d (HIGH), RE=%d (LOW)", MAX485_DE, MAX485_RE);
+    ESP_LOGI(TAG, "Configured MAX485 pins: DE=%d (HIGH), RE=%d (LOW)", MAX485_DE, MAX485_RE);
 
     rtc_gpio_hold_dis((gpio_num_t)MAX485_RE);       //restore normal pin function on RE pin (allow it to be driven low for receive mode)
     rtc_gpio_hold_dis((gpio_num_t)MAX485_DE);
@@ -513,8 +515,8 @@ static void adc_read_task(void *pvParameters)
                  adc_raw, adc_pin_voltage, battery_voltage, divider_ratio, BATTERY_CAL_FACTOR, BAT_SOC);
 
         // check for rnage for potential mqtt warning
-        if (battery_voltage < LOW_BATTERY_THRESHOLD) {
-            ESP_LOGW(TAG, "Battery voltage %.2f V is below low threshold %.2f V", battery_voltage, LOW_BATTERY_THRESHOLD);
+        if (battery_voltage < theConf.batLowLevel) {
+            ESP_LOGW(TAG, "Battery voltage %.2f V is below low threshold %.2f V", battery_voltage, theConf.batLowLevel);
             criticalf=true;
         }
         vTaskDelay(pdMS_TO_TICKS(1000000));  // Read every wake up interval once
@@ -629,7 +631,7 @@ static esp_err_t rs485_send_read_do_request(uint8_t *response, size_t response_s
 
 static float get_do_value_to_send(void)
 {
-    // ESP_LOGI(TAG, "RTC DO value: %.2f", (double)s_do_value_rtc);
+    ESP_LOGI(TAG, "RTC DO value: %.2f", (double)s_do_value_rtc);
     return s_do_value_rtc;
 }
 
@@ -661,7 +663,7 @@ static bool get_sta_ifreq(struct ifreq *ifr)
         return false;
     }
 
-    // ESP_LOGI(TAG, "Binding HTTP client to STA interface: %s", ifr->ifr_name);
+    ESP_LOGI(TAG, "Binding HTTP client to STA interface: %s", ifr->ifr_name);
     return true;
 }
 
@@ -701,7 +703,7 @@ static void send_http_post(const char *http_body)
         return;
     }
 
-    // ESP_LOGI(TAG, "HTTP POST URL: %s", HTTP_POST_URL);
+    ESP_LOGI(TAG, "HTTP POST URL: %s", HTTP_POST_URL);
 
     ESP_ERROR_CHECK(esp_http_client_set_header(client, "Content-Type", "application/json"));
     ESP_ERROR_CHECK(esp_http_client_set_post_field(client, http_body, strlen(http_body)));
@@ -710,7 +712,7 @@ static void send_http_post(const char *http_body)
     if (err == ESP_OK) {
         int status_code = esp_http_client_get_status_code(client);
         int content_length = esp_http_client_get_content_length(client);
-        // ESP_LOGI(TAG, "HTTP POST status=%d, content_length=%d", status_code, content_length);
+        ESP_LOGI(TAG, "HTTP POST status=%d, content_length=%d", status_code, content_length);
     } else {
         ESP_LOGE(TAG, "HTTP POST failed: %s", esp_err_to_name(err));
     }
@@ -859,6 +861,44 @@ static void handle_mqtt_cmd_payload(const char *topic, int topic_len, const char
     cJSON_Delete(json);
 }
 
+static bool build_low_battery_alarm_json(char *json_out, size_t json_out_size)
+{
+    int written = snprintf(json_out, json_out_size,
+                           "{\"poolid\":%u,\"unitid\":%u,\"voltage\":%.2f}",
+                           (unsigned)theConf.poolid,
+                           (unsigned)theConf.unitid,
+                           (double)BAT_VOLTS);
+    return written > 0 && (size_t)written < json_out_size;
+}
+
+static bool mqtt_publish_and_wait(esp_mqtt_client_handle_t client, const char *topic, const char *payload)
+{
+    if (client == NULL || topic == NULL || payload == NULL || s_mqtt_event_group == NULL) {
+        return false;
+    }
+
+    xEventGroupClearBits(s_mqtt_event_group, MQTT_PUBLISHED_BIT);
+    ESP_LOGI(TAG, "Publishing MQTT topic: %s", topic);
+
+    int msg_id = esp_mqtt_client_publish(client, topic, payload, 0, 1, 0);
+    if (msg_id < 0) {
+        ESP_LOGE(TAG, "MQTT publish failed for topic: %s", topic);
+        return false;
+    }
+
+    EventBits_t pub_bits = xEventGroupWaitBits(
+        s_mqtt_event_group,
+        MQTT_PUBLISHED_BIT,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(3000));
+    if ((pub_bits & MQTT_PUBLISHED_BIT) == 0) {
+        ESP_LOGW(TAG, "MQTT publish did not get ack before timeout for topic: %s", topic);
+    }
+
+    return true;
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     (void)handler_args;
@@ -903,6 +943,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void send_mqtt_publish(const char *payload)
 {
     char mqtt_topic[64];
+    char alarm_payload[96];
     int topic_len = snprintf(mqtt_topic, sizeof(mqtt_topic), "shrimpDO/%u/%u",
                              (unsigned)theConf.poolid, (unsigned)theConf.unitid);
     if (topic_len <= 0 || topic_len >= (int)sizeof(mqtt_topic)) {
@@ -953,19 +994,12 @@ static void send_mqtt_publish(const char *payload)
     if ((bits & MQTT_CONNECTED_BIT) == 0) {
         ESP_LOGE(TAG, "MQTT connect timeout");
     } else {
-        ESP_LOGI(TAG, "Publishing MQTT topic: %s", mqtt_topic);
-        int msg_id = esp_mqtt_client_publish(client, mqtt_topic, payload, 0, 1, 0);
-        if (msg_id < 0) {
-            ESP_LOGE(TAG, "MQTT publish failed");
-        } else {
-            EventBits_t pub_bits = xEventGroupWaitBits(
-                s_mqtt_event_group,
-                MQTT_PUBLISHED_BIT,
-                pdFALSE,
-                pdFALSE,
-                pdMS_TO_TICKS(3000));
-            if ((pub_bits & MQTT_PUBLISHED_BIT) == 0) {
-                ESP_LOGW(TAG, "MQTT publish did not get ack before timeout");
+        bool telemetry_published = mqtt_publish_and_wait(client, mqtt_topic, payload);
+        if (telemetry_published &&criticalf) {
+            if (build_low_battery_alarm_json(alarm_payload, sizeof(alarm_payload))) {
+                mqtt_publish_and_wait(client, "shrimp/alarm", alarm_payload);
+            } else {
+                ESP_LOGE(TAG, "Failed to build low battery alarm JSON payload");
             }
         }
     }
@@ -1012,8 +1046,8 @@ static esp_err_t configure_softap_subnet(void)
     ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(s_ap_netif, &ap_ip_info), TAG, "set SoftAP ip failed");
     ESP_RETURN_ON_ERROR(esp_netif_dhcps_start(s_ap_netif), TAG, "start SoftAP DHCP server failed");
 
-    // ESP_LOGI(TAG, "SoftAP subnet set to " IPSTR "/24 (gw " IPSTR ")",
-    //          IP2STR(&ap_ip_info.ip), IP2STR(&ap_ip_info.gw));
+    ESP_LOGI(TAG, "SoftAP subnet set to " IPSTR "/24 (gw " IPSTR ")",
+             IP2STR(&ap_ip_info.ip), IP2STR(&ap_ip_info.gw));
     return ESP_OK;
 }
 
@@ -1037,12 +1071,28 @@ static void collect_do_sample_until_ready(void)
     int retries = 0;
     int rs485_response_len = 0;
     int vanerr=0;
+    // Hard deadline: guarantees the loop exits even when the sensor is absent
+    // or returns garbage (e.g. low voltage echoes).  Covers the worst case of
+    // MAXRETRY_MAX485 × WAITDO + some margin for inter-attempt delays.
+    const TickType_t start_tick = xTaskGetTickCount();
+    const uint32_t max_wait_ms  = (uint32_t)(MAXRETRY_MAX485 + 1) * (WAITDO + 2000);
 
     while (true) {
+        if ((xTaskGetTickCount() - start_tick) >= pdMS_TO_TICKS(max_wait_ms)) {
+            ESP_LOGW(TAG, "RS485 collect timed out after %u ms, proceeding with last value %.2f",
+                     (unsigned)max_wait_ms, (double)s_do_value_rtc);
+            if (retries > 0) {
+                s_do_value_rtc = avgDO / retries;
+            } else if (s_do_value_rtc <= 0.0f) {
+                s_do_value_rtc = -1.0f;
+            }
+            break;
+        }
+
         esp_err_t rs485_err = rs485_send_read_do_request(rs485_response, sizeof(rs485_response), &rs485_response_len);
         if (rs485_err == ESP_OK && rs485_response_len > 0) {
-            // ESP_LOGI(TAG, "RS485 response length: %d", rs485_response_len);
-            // ESP_LOG_BUFFER_HEX(TAG, rs485_response, rs485_response_len);
+            ESP_LOGI(TAG, "RS485 response length: %d", rs485_response_len);
+            ESP_LOG_BUFFER_HEX(TAG, rs485_response, rs485_response_len);
 
             DOHandler(rs485_response + MODBUS_RSP_DATA_OFFSET, MODBUS_RSP_DATA_LEN);
 
@@ -1064,11 +1114,10 @@ static void collect_do_sample_until_ready(void)
             ESP_LOGE(TAG, "RS485 request failed: %s %d", esp_err_to_name(rs485_err), rs485_response_len);
             vTaskDelay(pdMS_TO_TICKS(1000)); // Short delay before retrying
             vanerr++;
-            if(vanerr>MAXRETRY_MAX485)
-            {
-                    ESP_LOGE(TAG, "RS485 request retries exhausted");
-                    s_do_value_rtc=-1.0;
-                    break;   
+            if (vanerr >= MAXRETRY_MAX485) {
+                ESP_LOGE(TAG, "RS485 request retries exhausted");
+                s_do_value_rtc = -1.0f;
+                break;
             }
         }
     }
@@ -1111,7 +1160,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         if (event_id == WIFI_EVENT_STA_START) {
             esp_wifi_connect();
         } else if (event_id == WIFI_EVENT_AP_START) {
-            // ESP_LOGI(TAG, "SoftAP started, SSID=%s", AP_SSID);
+            ESP_LOGI(TAG, "SoftAP started, SSID=%s", AP_SSID);
             if (confFlag) {
                 s_ap_client_connected = false;
                 start_task_once(&ap_assigned_ip_blink_task, "APBlink", 2048, 4, &s_ap_blink_task);
@@ -1134,15 +1183,15 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        // ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
         if (s_ap_netif != NULL) {
             esp_netif_ip_info_t ap_ip_info = {};
             if (esp_netif_get_ip_info(s_ap_netif, &ap_ip_info) == ESP_OK) {
-                // ESP_LOGI(TAG, "AP  IP: " IPSTR " GW: " IPSTR " NM: " IPSTR,
-                //          IP2STR(&ap_ip_info.ip),
-                //          IP2STR(&ap_ip_info.gw),
-                //          IP2STR(&ap_ip_info.netmask));
+                ESP_LOGI(TAG, "AP  IP: " IPSTR " GW: " IPSTR " NM: " IPSTR,
+                         IP2STR(&ap_ip_info.ip),
+                         IP2STR(&ap_ip_info.gw),
+                         IP2STR(&ap_ip_info.netmask));
             }
         }
         if (!s_theconf_invalid && s_rs485_task == NULL) {
@@ -1154,7 +1203,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_AP_STAIPASSIGNED) {
         ip_event_ap_staipassigned_t *event = (ip_event_ap_staipassigned_t *)event_data;
-        // ESP_LOGI(TAG, "AP assigned client IP: " IPSTR, IP2STR(&event->ip));
+        ESP_LOGI(TAG, "AP assigned client IP: " IPSTR, IP2STR(&event->ip));
         s_ap_client_connected = true;
 
         start_task_once(&ap_assigned_ip_blink_task, "APBlink", 2048, 4, &s_ap_blink_task);
