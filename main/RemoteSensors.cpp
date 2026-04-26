@@ -59,6 +59,20 @@ static RTC_DATA_ATTR int s_transport_mode_latched = MESSAGE_TRANSPORT_HTTP;
 static float avgDO=0.0f,waterTemp=0.0f;
 static bool confFlag=false;
 static bool s_theconf_invalid = false;
+typedef struct {
+    float temperature;
+    float percent;
+    float value;
+} sensor_triplet_t;
+
+static const uint8_t kDoSensorAddr = 0x10;
+static const uint8_t kPhSensorAddr = 0x11;
+static const uint8_t kSalinitySensorAddr = 0x12;
+static const uint8_t kModbusReadHoldingFn = 0x03;
+static const uint16_t kDoSensorStartReg = 0x2000;
+static const uint16_t kPhSensorStartReg = 0x2000;
+static const uint16_t kSalinitySensorStartReg = 0x2000;
+static const uint16_t kSensorRegCount = 0x0006;
 extern void sensor_webserver(void *pArg);
 static void ap_assigned_ip_blink_task(void *pvParameters);
 
@@ -345,28 +359,36 @@ static float parse_modbus_float(const uint8_t *src)
     return out;
 }
 
+// Parse 3 IEEE754 floats from Modbus payload: temperature, percent, sensor value.
+static bool parse_sensor_triplet(const uint8_t *payload, uint16_t len, sensor_triplet_t *out)
+{
+    if (payload == NULL || out == NULL || len < MODBUS_RSP_DATA_LEN) {
+        return false;
+    }
+
+    out->temperature = parse_modbus_float(&payload[0]);
+    out->percent = parse_modbus_float(&payload[4]);
+    out->value = parse_modbus_float(&payload[8]);
+    return true;
+}
+
 int DOHandler(const uint8_t *que, uint16_t len)
 {
-    if (que == NULL || len < MODBUS_RSP_DATA_LEN) {
+    sensor_triplet_t sample = {};
+    if (!parse_sensor_triplet(que, len, &sample)) {
         ESP_LOGE(TAG, "Invalid DO payload len=%u (expected %u)", len, MODBUS_RSP_DATA_LEN);
         return -1;
     }
 
-    float ftemp = parse_modbus_float(&que[0]);
-    float fpercent = parse_modbus_float(&que[4]);
-    float fdoval = parse_modbus_float(&que[8]);
-    waterTemp=ftemp;
-    theConf.DOLevel=fdoval;
-    theConf.WTemp=ftemp;
-    theConf.IRLevel = random_float_range(0.5f, 8.4f);
-    theConf.PHLevel = random_float_range(0.5f, 8.4f);
-    theConf.SalinityLevel = random_float_range(0.5f, 8.4f);
+    waterTemp = sample.temperature;
+    theConf.DOLevel = sample.value;
+    theConf.WTemp = sample.temperature;
     
 
     s_count++;
-    s_do_value_rtc = fdoval; // Store DO value in RTC variable for next wakeup
+    s_do_value_rtc = sample.value; // Store DO value in RTC variable for next wakeup
     ESP_LOGW(TAG,"Temp %0.2fC percent %0.2f%% DO %0.2fmg/L %.02f count %d retries %d",
-           ftemp, fpercent * 100.0f, fdoval, s_do_value_rtc, s_count,s_retry_count);
+           sample.temperature, sample.percent * 100.0f, sample.value, s_do_value_rtc, s_count, s_retry_count);
     return 0;
 }
 
@@ -388,7 +410,7 @@ static esp_err_t uart485_init(void)
     ESP_RETURN_ON_ERROR(uart_set_pin(UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN, UART485_CTS_PIN), TAG, "uart_set_pin failed");
     ESP_RETURN_ON_ERROR(uart_set_mode(UART485_PORT, UART_MODE_RS485_HALF_DUPLEX), TAG, "uart_set_mode failed");
 
-    ESP_LOGI(TAG, "UART485 RTU ready on UART%d (8E1, TX=%d RX=%d RTS=%d)", UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN);
+    ESP_LOGI(TAG, "UART485 RTU ready on UART%d (8N1, TX=%d RX=%d RTS=%d)", UART485_PORT, UART485_TX_PIN, UART485_RX_PIN, UART485_RTS_PIN);
     return ESP_OK;
 }
 
@@ -409,8 +431,13 @@ static esp_err_t app_gpio_outputs_init(void)
     rtc_gpio_hold_dis((gpio_num_t)MAX485_RE);       //restore normal pin function on RE pin (allow it to be driven low for receive mode)
     rtc_gpio_hold_dis((gpio_num_t)MAX485_DE);
     gpio_set_level(DOPOWER, 1);      // turn ON the DO Sensor
+    gpio_set_level(SENSOR2, 1);      // turn ON the secondary sensor power rail
+    gpio_set_level(SENSOR3, 1);      // turn ON the secondary sensor power rail
+
+        // while(1)
 
     vTaskDelay(10); // Short delay to ensure DE/RE levels are stable before UART operations
+    
     return ESP_OK;
 }
 
@@ -529,21 +556,23 @@ void set_tx_rs485()
 {
     gpio_set_level(MAX485_DE, 1);
     gpio_set_level(MAX485_RE, 1);
-    vTaskDelay(pdMS_TO_TICKS(10)); // Short delay to ensure DE/RE levels are stable before UART operations
+    vTaskDelay(pdMS_TO_TICKS(1)); // Keep turnaround short so early reply bytes are not lost
 
 }
 void set_rx_rs485()
 {
     gpio_set_level(MAX485_DE, 0);
     gpio_set_level(MAX485_RE, 0);
-    vTaskDelay(pdMS_TO_TICKS(10)); // Short delay to ensure DE/RE levels are stable before UART operations
+    vTaskDelay(pdMS_TO_TICKS(1)); // Keep turnaround short so early reply bytes are not lost
 
 }
 void set_sleep_rs485()
 {
     gpio_set_level(MAX485_DE, 0);
     gpio_set_level(MAX485_RE, 1);
-    gpio_set_level(DOPOWER, 0);             // Turn OFF the3 DO Sensor to save power during deep sleep
+    gpio_set_level(DOPOWER, 0);             // Turn OFF the DO Sensor to save power during deep sleep
+    gpio_set_level(SENSOR2, 0);             // Turn OFF the Sensor 2 to save power during deep sleep
+    gpio_set_level(SENSOR3, 0);             // Turn OFF the DO Sensor to save power during deep sleep
 
     ESP_ERROR_CHECK(rtc_gpio_isolate(MAX485_DE));
     ESP_ERROR_CHECK(rtc_gpio_isolate(MAX485_RE));
@@ -562,19 +591,82 @@ static int uart485_send(const uint8_t *data, size_t len)
 
 static int uart485_read(uint8_t *data, size_t len, TickType_t timeout_ticks)
 {
-    #ifdef SLEEP
-    set_rx_rs485();
-    #endif
     return uart_read_bytes(UART485_PORT, data, len, timeout_ticks);
 }
 
-static esp_err_t rs485_send_read_do_request(uint8_t *response, size_t response_size, int *response_len)
+static uint16_t modbus_crc16(const uint8_t *data, size_t len)
 {
-    static const uint8_t request_frame[] = {0x10, 0x03, 0x20, 0x00, 0x00, 0x06, 0xCD, 0x49};
+    uint16_t crc = 0xFFFF;
+    if (data == NULL) {
+        return crc;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+static int find_modbus_frame_offset(const uint8_t *buffer,
+                                    int buffer_len,
+                                    uint8_t slave_addr,
+                                    uint8_t function_code,
+                                    uint8_t expected_data_len)
+{
+    if (buffer == NULL || buffer_len < MODBUS_RSP_TOTAL_LEN) {
+        return -1;
+    }
+
+    int last_start = buffer_len - MODBUS_RSP_TOTAL_LEN;
+    for (int i = 0; i <= last_start; ++i) {
+        if (buffer[i] != slave_addr || buffer[i + 1] != function_code || buffer[i + 2] != expected_data_len) {
+            continue;
+        }
+
+        uint16_t expected_crc = modbus_crc16(&buffer[i], MODBUS_RSP_TOTAL_LEN - 2);
+        uint16_t rx_crc = (uint16_t)buffer[i + MODBUS_RSP_TOTAL_LEN - 2] |
+                          ((uint16_t)buffer[i + MODBUS_RSP_TOTAL_LEN - 1] << 8);
+        if (expected_crc == rx_crc) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+// Build/send one Modbus RTU read-holding-register request and validate header/length.
+// Request layout: [slave][0x03][start_hi][start_lo][count_hi][count_lo][crc_lo][crc_hi]
+static esp_err_t rs485_send_read_sensor_request(uint8_t slave_addr,
+                                                uint16_t start_reg,
+                                                uint8_t *response,
+                                                size_t response_size,
+                                                int *response_len)
+{
+    uint8_t request_frame[8] = {
+        slave_addr,
+        kModbusReadHoldingFn,
+        (uint8_t)(start_reg >> 8),
+        (uint8_t)(start_reg & 0xFF),
+        (uint8_t)(kSensorRegCount >> 8),
+        (uint8_t)(kSensorRegCount & 0xFF),
+        0x00,
+        0x00,
+    };
 
     if (response == NULL || response_len == NULL || response_size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    uint16_t crc = modbus_crc16(request_frame, 6);
+    request_frame[6] = (uint8_t)(crc & 0xFF);
+    request_frame[7] = (uint8_t)((crc >> 8) & 0xFF);
 
     *response_len = 0;
 
@@ -587,10 +679,13 @@ static esp_err_t rs485_send_read_do_request(uint8_t *response, size_t response_s
     }
 
     ESP_RETURN_ON_ERROR(uart_wait_tx_done(UART485_PORT, pdMS_TO_TICKS(1000)), TAG, "uart_wait_tx_done failed");
+    #ifdef SLEEP
+    set_rx_rs485();
+    #endif
 
     int total_read = 0;
     TickType_t start = xTaskGetTickCount();
-    TickType_t max_wait = pdMS_TO_TICKS(700);
+    TickType_t max_wait = pdMS_TO_TICKS(MODBUS_RESPONSE_TOUT_MS);
 
     while (total_read < (int)response_size && (xTaskGetTickCount() - start) < max_wait) {
         int chunk = uart485_read(response + total_read, response_size - total_read, pdMS_TO_TICKS(60));
@@ -612,11 +707,35 @@ static esp_err_t rs485_send_read_do_request(uint8_t *response, size_t response_s
     *response_len = total_read;
 
     if (total_read < MODBUS_RSP_TOTAL_LEN) {
+        if (total_read > 0) {
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, response, total_read, ESP_LOG_WARN);
+        }
         ESP_LOGW(TAG, "Short Modbus response: got %d bytes, need %d", total_read, MODBUS_RSP_TOTAL_LEN);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    if (response[0] != request_frame[0] || response[1] != request_frame[1]) {
+    int frame_offset = find_modbus_frame_offset(response, total_read, slave_addr, kModbusReadHoldingFn, MODBUS_RSP_DATA_LEN);
+    if (frame_offset < 0) {
+        // A Modbus exception uses function|0x80 and a 1-byte exception code.
+        for (int i = 0; i + 5 <= total_read; ++i) {
+            if (response[i] == slave_addr && response[i + 1] == (uint8_t)(kModbusReadHoldingFn | 0x80U)) {
+                ESP_LOGW(TAG, "Modbus exception from slave 0x%02X: code=0x%02X", slave_addr, response[i + 2]);
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+        }
+
+        ESP_LOGW(TAG, "Unexpected Modbus header: %02X %02X", response[0], response[1]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    if (frame_offset > 0) {
+        ESP_LOGW(TAG, "Discarding %d leading byte(s) before Modbus frame", frame_offset);
+        memmove(response, response + frame_offset, MODBUS_RSP_TOTAL_LEN);
+        total_read -= frame_offset;
+        *response_len = total_read;
+    }
+
+    if (response[0] != slave_addr || response[1] != kModbusReadHoldingFn) {
         ESP_LOGW(TAG, "Unexpected Modbus header: %02X %02X", response[0], response[1]);
         return ESP_ERR_INVALID_RESPONSE;
     }
@@ -626,7 +745,60 @@ static esp_err_t rs485_send_read_do_request(uint8_t *response, size_t response_s
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    uint16_t expected_crc = modbus_crc16(response, MODBUS_RSP_TOTAL_LEN - 2);
+    uint16_t rx_crc = (uint16_t)response[MODBUS_RSP_TOTAL_LEN - 2] |
+                      ((uint16_t)response[MODBUS_RSP_TOTAL_LEN - 1] << 8);
+    if (expected_crc != rx_crc) {
+        ESP_LOGW(TAG, "Modbus CRC mismatch: expected 0x%04X got 0x%04X", expected_crc, rx_crc);
+        return ESP_ERR_INVALID_CRC;
+    }
+
     return ESP_OK;
+}
+
+// Read one secondary sensor (PH/SAL), parse its value, and force -1.0 on failure.
+static esp_err_t read_secondary_sensor_level(uint8_t sensor_addr,
+                                             uint16_t start_reg,
+                                             const char *sensor_name,
+                                             float *level_out)
+{
+    uint8_t response[UART485_RX_BUF_SIZE] = {0};
+    int response_len = 0;
+    sensor_triplet_t sample = {};
+
+    if (level_out == NULL || sensor_name == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = rs485_send_read_sensor_request(sensor_addr, start_reg, response, sizeof(response), &response_len);
+    if (err != ESP_OK) {
+        *level_out = -1.0f;
+        ESP_LOGW(TAG, "%s read failed: %s", sensor_name, esp_err_to_name(err));
+        return err;
+    }
+
+    if (!parse_sensor_triplet(response + MODBUS_RSP_DATA_OFFSET, MODBUS_RSP_DATA_LEN, &sample)) {
+        *level_out = -1.0f;
+        ESP_LOGW(TAG, "%s payload parse failed", sensor_name);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    *level_out = sample.value;
+    ESP_LOGI(TAG, "%s temp %.2f percent %.2f%% level %.2f", sensor_name,
+             (double)sample.temperature, (double)(sample.percent * 100.0f), (double)sample.value);
+    return ESP_OK;
+}
+
+// Poll all enabled non-DO sensors once so telemetry always carries latest values.
+static void refresh_secondary_sensor_levels(void)
+{
+    if (theConf.PHSensor) {
+        read_secondary_sensor_level(kPhSensorAddr, kPhSensorStartReg, "PH", &theConf.PHLevel);
+    }
+
+    if (theConf.SalinitySensor) {
+        read_secondary_sensor_level(kSalinitySensorAddr, kSalinitySensorStartReg, "SAL", &theConf.SalinityLevel);
+    }
 }
 
 static float get_do_value_to_send(void)
@@ -640,7 +812,11 @@ static bool build_telemetry_json(float do_level, char *json_out, size_t json_out
     int written = snprintf(json_out, json_out_size,
                            "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f,\"Raw\":%d}]}",
                            (unsigned)theConf.poolid, (unsigned)theConf.unitid,
-                           (double)do_level, s_count, s_retry_count, 1.0, 2.0, 3.0, waterTemp, (int)theConf.interval, BAT_SOC,BAT_VOLTS, adc_raw);
+                           (double)do_level, s_count, s_retry_count,
+                           (double)theConf.PHLevel,
+                           (double)theConf.IRLevel,
+                           (double)theConf.SalinityLevel,
+                           waterTemp, (int)theConf.interval, BAT_SOC,BAT_VOLTS, adc_raw);
     // int written = snprintf(json_out, json_out_size,
     //                        "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d},\
     //                        {\"cmd\":\"DOPH\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d}]}",
@@ -1077,6 +1253,8 @@ static void collect_do_sample_until_ready(void)
     const TickType_t start_tick = xTaskGetTickCount();
     const uint32_t max_wait_ms  = (uint32_t)(MAXRETRY_MAX485 + 1) * (WAITDO + 2000);
 
+    // Loop exits on valid DO, DO timeout, or retry exhaustion.
+    // On any DO terminal path we still poll secondary sensors before publish.
     while (true) {
         if ((xTaskGetTickCount() - start_tick) >= pdMS_TO_TICKS(max_wait_ms)) {
             ESP_LOGW(TAG, "RS485 collect timed out after %u ms, proceeding with last value %.2f",
@@ -1086,10 +1264,12 @@ static void collect_do_sample_until_ready(void)
             } else if (s_do_value_rtc <= 0.0f) {
                 s_do_value_rtc = -1.0f;
             }
+            refresh_secondary_sensor_levels();
             break;
         }
 
-        esp_err_t rs485_err = rs485_send_read_do_request(rs485_response, sizeof(rs485_response), &rs485_response_len);
+        esp_err_t rs485_err = rs485_send_read_sensor_request(kDoSensorAddr, kDoSensorStartReg,
+                                     rs485_response, sizeof(rs485_response), &rs485_response_len);
         if (rs485_err == ESP_OK && rs485_response_len > 0) {
             ESP_LOGI(TAG, "RS485 response length: %d", rs485_response_len);
             ESP_LOG_BUFFER_HEX(TAG, rs485_response, rs485_response_len);
@@ -1098,6 +1278,7 @@ static void collect_do_sample_until_ready(void)
 
             if (s_do_value_rtc > MINDO) {
                 // Valid DO value: send immediately and skip additional averaging.
+                refresh_secondary_sensor_levels();
                 break;
             }
 
@@ -1108,6 +1289,7 @@ static void collect_do_sample_until_ready(void)
             if (retries >= MAXRETRY_MAX485) {
                 ESP_LOGI(TAG, "Retrys exhausted");
                 s_do_value_rtc = avgDO / retries;
+                refresh_secondary_sensor_levels();
                 break;
             }
         } else {
@@ -1117,6 +1299,7 @@ static void collect_do_sample_until_ready(void)
             if (vanerr >= MAXRETRY_MAX485) {
                 ESP_LOGE(TAG, "RS485 request retries exhausted");
                 s_do_value_rtc = -1.0f;
+                refresh_secondary_sensor_levels();
                 break;
             }
         }
@@ -1137,7 +1320,8 @@ static void publish_cycle_and_update_state(void)
     if (theConf.lifecount % 3 == 0) {
         save_theconf_to_nvs(); // every 3
     }
-    enter_deep_sleep("SYS", DEEP_SLEEP_MS*theConf.interval);
+    enter_deep_sleep("SYS", 10000);
+    // enter_deep_sleep("SYS", DEEP_SLEEP_MS*theConf.interval);
 }
 
 void rs485_task_manager(void *pvParameters)
@@ -1148,7 +1332,8 @@ void rs485_task_manager(void *pvParameters)
         publish_cycle_and_update_state();
 
         // Delay before next cycle; in non-config mode deep sleep will normally restart the device first.
-        vTaskDelay(pdMS_TO_TICKS(theConf.interval * 60000));
+        vTaskDelay(pdMS_TO_TICKS(15000));
+        // vTaskDelay(pdMS_TO_TICKS(theConf.interval * 60000));
         s_message_sent = false;
     }
 } // task will be killed due to sleep, no need to delete it explicitly or crash will not happen
