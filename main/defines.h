@@ -55,7 +55,7 @@
 #define WAITDO (10000)
 // #define MAX485_DE GPIO_NUM_14
 // #define MAX485_RE GPIO_NUM_13           // old pcb
-#define MAX485_DE GPIO_NUM_8
+#define MAX485_DE GPIO_NUM_8                // CONFIMRD DO not doubt it or change it same for RX/TX
 #define MAX485_RE GPIO_NUM_19
 #define NTW GPIO_NUM_41
 #define MAXRETRY_MAX485 (3)
@@ -70,7 +70,7 @@
 #define BATSOC GPIO_NUM_1
 #define ADC_GPIO BATSOC
 #define ADC_VREF 1.1f  // Reference voltage in volts
-#define BATTERY_CAL_FACTOR 0.886f
+#define BATTERY_CAL_FACTOR 0.815f  // actual 7.80V reading 9.20V => 0.962 * (7.80/9.20)
 #define LOW_BATTERY_THRESHOLD (6.4f)
 // Modbus frame layout
 #define MODBUS_RSP_DATA_OFFSET (3)

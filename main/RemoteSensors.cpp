@@ -1320,8 +1320,7 @@ static void publish_cycle_and_update_state(void)
     if (theConf.lifecount % 3 == 0) {
         save_theconf_to_nvs(); // every 3
     }
-    enter_deep_sleep("SYS", 10000);
-    // enter_deep_sleep("SYS", DEEP_SLEEP_MS*theConf.interval);
+    enter_deep_sleep("SYS", DEEP_SLEEP_MS*theConf.interval);
 }
 
 void rs485_task_manager(void *pvParameters)
