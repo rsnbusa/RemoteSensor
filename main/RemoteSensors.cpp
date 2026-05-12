@@ -94,6 +94,7 @@ bool criticalf=false;
 
 static EventGroupHandle_t s_mqtt_event_group = NULL;
 static int s_transport_mode = MESSAGE_TRANSPORT_HTTP;
+static int64_t s_wakeup_start_us = 0;
 
 static void copy_cstr_to_u8(uint8_t *dst, size_t dst_size, const char *src)
 {
@@ -850,6 +851,10 @@ static void enter_deep_sleep(const char *who, uint32_t howmuch)
         ESP_LOGI(TAG, "Configuration mode - skipping deep sleep");
         return;
     }
+    int64_t now_us = esp_timer_get_time();
+    int64_t elapsed_us = (s_wakeup_start_us > 0 && now_us >= s_wakeup_start_us) ?
+                         (now_us - s_wakeup_start_us) : 0;
+    ESP_LOGW(TAG, "Wake-to-sleep elapsed: %lld us", (long long)elapsed_us);
     ESP_LOGI(TAG, "Entering deep sleep[%s] for %d ms count %d retries %d", who, howmuch, s_count, s_retry_count);
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)howmuch * 1000ULL));
     set_sleep_rs485();      //crutial for power savings
@@ -1090,7 +1095,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     if (event_id == MQTT_EVENT_CONNECTED) {
         char cmd_topic[80];
-        int topic_len = snprintf(cmd_topic, sizeof(cmd_topic), "shrimpDO/%u/%u/cmd",
+        int topic_len = snprintf(cmd_topic, sizeof(cmd_topic), "%sDO/%u/%u/cmd",theConf.farmname,
                                  (unsigned)theConf.poolid, (unsigned)theConf.unitid);
         if (topic_len > 0 && topic_len < (int)sizeof(cmd_topic)) {
             int sub_id = esp_mqtt_client_subscribe(event->client, cmd_topic, 1);
@@ -1120,11 +1125,11 @@ static void send_mqtt_publish(const char *payload)
 {
     char mqtt_topic[64];
     char alarm_payload[96];
-    int topic_len = snprintf(mqtt_topic, sizeof(mqtt_topic), "shrimpDO/%u/%u",
-                             (unsigned)theConf.poolid, (unsigned)theConf.unitid);
+    int topic_len = snprintf(mqtt_topic, sizeof(mqtt_topic), "%sDO/%u/%u",
+                             theConf.farmname, (unsigned)theConf.poolid, (unsigned)theConf.unitid);
     if (topic_len <= 0 || topic_len >= (int)sizeof(mqtt_topic)) {
-        ESP_LOGE(TAG, "MQTT topic build failed for pool=%u unit=%u",
-                 (unsigned)theConf.poolid, (unsigned)theConf.unitid);
+        ESP_LOGE(TAG, "MQTT topic build failed for farm=%s pool=%u unit=%u",
+                 theConf.farmname, (unsigned)theConf.poolid, (unsigned)theConf.unitid);
         return;
     }
 
@@ -1401,9 +1406,9 @@ void start_network()
     if (s_transport_mode == MESSAGE_TRANSPORT_MQTT) {
         snprintf(STA_SSID, sizeof(STA_SSID), "%s", mqtt_sta_ssid_from_conf());
     } else {
-        snprintf(STA_SSID, sizeof(STA_SSID), "shrimp-p-%03u-u-%02u", theConf.poolid, theConf.unitid);
+        snprintf(STA_SSID, sizeof(STA_SSID), "%s-p-%03u-u-%02u", theConf.farmname, theConf.poolid, theConf.unitid);
     }
-    snprintf(AP_SSID, sizeof(AP_SSID), "DOSensor-%03u-%02u", theConf.poolid, theConf.unitid);
+    snprintf(AP_SSID, sizeof(AP_SSID), "%sDOSensor-%03u-%02u", theConf.farmname, theConf.poolid, theConf.unitid);
     DEEP_SLEEP_MS=MINTIME; // update deep sleep time according to configuration, default  minutes (60000 ms)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -1490,6 +1495,7 @@ extern "C"{
 void app_main(void)
 {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    s_wakeup_start_us = esp_timer_get_time();
 
     gpio_config_t conf_btn = {};
     conf_btn.pin_bit_mask = (1ULL << BOOT_BTN_GPIO);
@@ -1527,6 +1533,8 @@ void app_main(void)
     load_transport_mode_from_conf();
     ESP_LOGI(TAG, "Transport from theConf.conntype: %d (%s)",
              s_transport_mode, transport_mode_str(s_transport_mode));
+    printf("Configuration: poolid=%u unitid=%u interval=%u sec PHSensor=%d SalinitySensor=%d\n",
+             (unsigned)theConf.poolid, (unsigned)theConf.unitid, (unsigned)theConf.interval, theConf.PHLevel, theConf.SalinityLevel);
 
     if (s_theconf_invalid) {
         ESP_LOGW(TAG, "Invalid/legacy theConf detected, forcing AP-only configuration mode");
@@ -1534,7 +1542,7 @@ void app_main(void)
 
     // Decide mode from GPIO0 after loading persisted configuration.
     select_boot_mode_and_transport(wakeup_reason);
-
+// confFlag=true;
     if (confFlag) {
         blink_mode_indicator(2);
     } else if (s_transport_mode == MESSAGE_TRANSPORT_MQTT) {

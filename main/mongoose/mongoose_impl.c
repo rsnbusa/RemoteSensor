@@ -24,7 +24,8 @@
 
 // How to create a self signed Elliptic Curve certificate, see
 // https://github.com/cesanta/mongoose/blob/master/test/certs/generate.sh
-#define TLS_CERT                                                       \
+#ifndef WIZARD_TLS_CERT
+#define WIZARD_TLS_CERT                                                \
   "-----BEGIN CERTIFICATE-----\n"                                      \
   "MIIBMTCB2aADAgECAgkAluqkgeuV/zUwCgYIKoZIzj0EAwIwEzERMA8GA1UEAwwI\n" \
   "TW9uZ29vc2UwHhcNMjQwNTA3MTQzNzM2WhcNMzQwNTA1MTQzNzM2WjARMQ8wDQYD\n" \
@@ -34,13 +35,16 @@
   "RAIgTXW9MITQSwzqbNTxUUdt9DcB+8pPUTbWZpiXcA26GMYCIBiYw+DSFMLHmkHF\n" \
   "+5U3NXW3gVCLN9ntD5DAx8LTG8sB\n"                                     \
   "-----END CERTIFICATE-----\n"
+#endif
 
-#define TLS_KEY                                                        \
+#ifndef WIZARD_TLS_KEY
+#define WIZARD_TLS_KEY                                                 \
   "-----BEGIN EC PRIVATE KEY-----\n"                                   \
   "MHcCAQEEIAVdo8UAScxG7jiuNY2UZESNX/KPH8qJ0u0gOMMsAzYWoAoGCCqGSM49\n" \
   "AwEHoUQDQgAEqN6BIhvgbk7ecmUcn8Da9Avkj/uDNERtqWJG9r/or26X4u9jR5Jl\n" \
   "4hf5Gx17YJkq5/z3k6ogPDPpoAYWIw1/sw==\n"                             \
   "-----END EC PRIVATE KEY-----\n"
+#endif
 
 #define CONN_OTA 'O'
 #define CONN_FILE_UPLOAD 'F'
@@ -163,6 +167,7 @@ struct custom_api_handler {
 static struct custom_api_handler *s_custom_handlers;
 
 struct attribute s_Sensors_attributes[] = {
+  {"farmname", "string", NULL, offsetof(struct Sensors, farmname), 20, false},
   {"batLowLevel", "double", "%.02f", offsetof(struct Sensors, batLowLevel), 0, false},
   {"mqttpassw", "string", NULL, offsetof(struct Sensors, mqttpassw), 12, false},
   {"mqttssid", "string", NULL, offsetof(struct Sensors, mqttssid), 60, false},
@@ -215,14 +220,6 @@ static struct apihandler *get_api_handler(struct mg_str name) {
 static struct apihandler *find_handler(struct mg_http_message *hm) {
   if (hm->uri.len < 6 || strncmp(hm->uri.buf, "/api/", 5) != 0) return NULL;
   return get_api_handler(mg_str_n(hm->uri.buf + 5, hm->uri.len - 5));
-}
-
-void mg_json_get_str2(struct mg_str json, const char *path, char *buf,
-                      size_t len) {
-  struct mg_str s = mg_json_get_tok(json, path);
-  if (s.len > 1 && s.buf[0] == '"') {
-    mg_json_unescape(mg_str_n(s.buf + 1, s.len - 2), buf, len);
-  }
 }
 
 void mongoose_set_http_handlers(const char *name, ...) {
@@ -278,10 +275,11 @@ void mongoose_set_auth_handler(int (*fn)(const char *, const char *)) {
 static struct user *authenticate(struct mg_http_message *hm) {
   char user[100], pass[100];
   struct user *u, *result = NULL;
+  struct mg_str *ah = mg_http_get_header(hm, "Authorization");
   mg_http_creds(hm, user, sizeof(user), pass, sizeof(pass));
 
-  if (user[0] != '\0' && pass[0] != '\0') {
-    // Both user and password is set, auth by user/password via glue API
+  if (ah != NULL && pass[0] != '\0') {
+    // Auth header and password are set, auth by user/password via glue API
     int level = s_auth(user, pass);
     MG_DEBUG(("user %s, level: %d", user, level));
     if (level > 0) {  // Proceed only if the firmware authenticated us
@@ -297,7 +295,7 @@ static struct user *authenticate(struct mg_http_message *hm) {
         result->level = level, result->next = s_users, s_users = result;
       }
     }
-  } else if (user[0] == '\0' && pass[0] != '\0') {
+  } else if (ah == NULL && pass[0] != '\0') {
     for (u = s_users; u != NULL && result == NULL; u = u->next) {
       if (strcmp(u->token, pass) == 0) result = u;
     }
@@ -488,7 +486,7 @@ static void populate_struct_from_json(struct mg_str json, char *tmp,
     } else if (strcmp(a->type, "double") == 0) {
       mg_json_get_num(json, jpath, (double *) (tmp + a->offset));
     } else if (strcmp(a->type, "string") == 0) {
-      mg_json_get_str2(json, jpath, tmp + a->offset, a->size);
+      mg_json_unescape(json, jpath, tmp + a->offset, a->size);
     }
   }
 }
@@ -761,8 +759,8 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
     if (c->fn_data != NULL) {  // TLS listener
       struct mg_tls_opts opts;
       memset(&opts, 0, sizeof(opts));
-      opts.cert = mg_str(TLS_CERT);
-      opts.key = mg_str(TLS_KEY);
+      opts.cert = mg_str(WIZARD_TLS_CERT);
+      opts.key = mg_str(WIZARD_TLS_KEY);
       mg_tls_init(c, &opts);
     }
   }
@@ -1166,8 +1164,11 @@ void mongoose_enable_ota_url_checks(struct mongoose_ota_settings *settings) {
   s_ota_settings = *settings;
 }
 
-static void check_firmware_version_url(void) {
-  // Implement OTA via URL check
+static void check_firmware_metadata_url(void) {
+#if MG_OTA != MG_OTA_NONE
+  mg_ota_url_check(&g_mgr, s_ota_settings.current_version,
+    s_ota_settings.metadata_url, s_ota_settings.fn);
+#endif
 }
 
 void mongoose_poll(void) {
@@ -1176,7 +1177,7 @@ void mongoose_poll(void) {
   if (s_ota_settings.interval_seconds > 0 &&
       mg_timer_expired(&s_ota_timer, s_ota_settings.interval_seconds * 1000,
                        mg_now())) {
-    check_firmware_version_url();
+    check_firmware_metadata_url();
   }
 #if WIZARD_ENABLE_WEBSOCKET
   send_websocket_data();

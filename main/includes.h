@@ -15,6 +15,7 @@
 #include "esp_private/wifi.h"
 #include "esp_http_client.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "mqtt_client.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"

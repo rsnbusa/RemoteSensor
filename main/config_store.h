@@ -7,6 +7,7 @@
 struct theConf {
     char sta_ssid[60];
     char sta_pass[12];
+    char farmname[20];
     bool conntype;
     float WTemp;
     float IRLevel;

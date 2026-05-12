@@ -57,7 +57,7 @@ void my_get_Sensors(struct Sensors *data)
 	if (data == NULL) {
 		return;
 	}
-
+	copy_bounded(data->farmname, sizeof(data->farmname), theConf.farmname);
 	data->pool = theConf.poolid;
 	data->unit = theConf.unitid;
 	data->interval = theConf.interval;
@@ -100,6 +100,7 @@ void my_set_Sensors(struct Sensors *data) {
 	theConf.PHSensor = data->PH;
 	theConf.SalinitySensor = data->Sal;
 	theConf.IRsensor = data->IR;
+	strcpy(theConf.farmname,data->farmname);
 	theConf.conntype=data->conntype;
 	theConf.batVolts=data->batVolts;
 	theConf.batLowLevel=data->batLowLevel;

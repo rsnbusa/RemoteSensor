@@ -134,20 +134,43 @@ struct dns_data {
   uint16_t txnid;
 };
 
-static void mg_sendnsreq(struct mg_connection *, struct mg_str *, int,
-                         struct mg_dns *, bool);
+static void sendnsreq(struct mg_connection *, struct mg_str *, int,
+                      struct mg_dns *, bool);
 
-static void mg_dns_free(struct dns_data **head, struct dns_data *d) {
+struct mdns_data {
+  struct mdns_data *next;
+  struct mg_connection *c;
+  uint64_t expire;
+  struct mg_str name;
+};
+
+static void sendmdnsreq(struct mg_connection *, struct mg_str *, int,
+                        struct mg_connection *, bool);
+
+static void dns_free(struct dns_data **head, struct dns_data *d) {
   LIST_DELETE(struct dns_data, head, d);
+  mg_free(d);
+}
+
+static void mdns_free(struct mdns_data **head, struct mdns_data *d) {
+  LIST_DELETE(struct mdns_data, head, d);
+  mg_free((void *) d->name.buf);
   mg_free(d);
 }
 
 void mg_resolve_cancel(struct mg_connection *c) {
   struct dns_data *tmp, *d;
+  struct mdns_data *mtmp, *md;
   struct dns_data **head = (struct dns_data **) &c->mgr->active_dns_requests;
+  struct mdns_data **mhead =
+      (struct mdns_data **) &c->mgr->active_mdns_requests;
   for (d = *head; d != NULL; d = tmp) {
     tmp = d->next;
-    if (d->c == c) mg_dns_free(head, d);
+    if (d->c == c) dns_free(head, d);
+  }
+  for (md = *mhead; md != NULL; md = mtmp) {
+    mtmp = md->next;
+    if (md->c == c) mdns_free(mhead, md);
   }
 }
 
@@ -278,8 +301,8 @@ static void dns_cb(struct mg_connection *c, int ev, void *ev_data) {
     uint64_t now = *(uint64_t *) ev_data;
     for (d = *head; d != NULL; d = tmp) {
       tmp = d->next;
-      // MG_DEBUG ("%lu %lu dns poll", d->expire, now));
-      if (now > d->expire) mg_error(d->c, "DNS timeout");
+      // MG_DEBUG(("%lu %lu dns poll", d->expire, now));
+      if (now > d->expire) mg_error(d->c, "DNS timeout");  // will remove entry
     }
   } else if (ev == MG_EV_READ) {
     struct mg_dns_message dm;
@@ -304,7 +327,7 @@ static void dns_cb(struct mg_connection *c, int ev, void *ev_data) {
           } else if (dm.addr.is_ip6 == false && dm.name[0] != '\0' &&
                      c->mgr->use_dns6 == false) {
             struct mg_str x = mg_str(dm.name);
-            mg_sendnsreq(d->c, &x, c->mgr->dnstimeout, &c->mgr->dns6, true);
+            sendnsreq(d->c, &x, c->mgr->dnstimeout, &c->mgr->dns6, true);
 #endif
           } else {
             mg_error(d->c, "%s DNS lookup failed", dm.name);
@@ -312,7 +335,7 @@ static void dns_cb(struct mg_connection *c, int ev, void *ev_data) {
         } else {
           MG_ERROR(("%lu already resolved", d->c->id));
         }
-        mg_dns_free(head, d);
+        dns_free(head, d);
         resolved = 1;
       }
     }
@@ -321,8 +344,7 @@ static void dns_cb(struct mg_connection *c, int ev, void *ev_data) {
   } else if (ev == MG_EV_CLOSE) {
     for (d = *head; d != NULL; d = tmp) {
       tmp = d->next;
-      mg_error(d->c, "DNS error");
-      mg_dns_free(head, d);
+      mg_error(d->c, "DNS error");  // will remove entry
     }
   }
 }
@@ -368,8 +390,8 @@ bool mg_dnsc_init(struct mg_mgr *mgr, struct mg_dns *dnsc) {
   return true;
 }
 
-static void mg_sendnsreq(struct mg_connection *c, struct mg_str *name, int ms,
-                         struct mg_dns *dnsc, bool ipv6) {
+static void sendnsreq(struct mg_connection *c, struct mg_str *name, int ms,
+                      struct mg_dns *dnsc, bool ipv6) {
   struct dns_data *d = NULL;
   if (!mg_dnsc_init(c->mgr, dnsc)) {
     mg_error(c, "resolver");
@@ -401,10 +423,14 @@ void mg_resolve(struct mg_connection *c, const char *url) {
   if (mg_aton(host, &c->rem)) {
     // host is an IP address, do not fire name resolution
     mg_connect_resolved(c);
+  } else if (host.len > 6 &&
+             strncmp(".local", &host.buf[host.len - 6], 6) == 0) {
+    // this is a request for a .local name (mDNS)
+    sendmdnsreq(c, &host, 500, c->mgr->mdns, c->mgr->use_dns6);  // 500ms tmout
   } else {
-    // host is not an IP, send DNS resolution request
+    // host is not an IP nor a .local, send DNS resolution request
     struct mg_dns *dns = c->mgr->use_dns6 ? &c->mgr->dns6 : &c->mgr->dns4;
-    mg_sendnsreq(c, &host, c->mgr->dnstimeout, dns, c->mgr->use_dns6);
+    sendnsreq(c, &host, c->mgr->dnstimeout, dns, c->mgr->use_dns6);
   }
 }
 
@@ -684,7 +710,7 @@ static void handle_mdns_response(struct mg_connection *c) {
     memset(&resp, 0, sizeof(resp));
     if (rh->num_answers > mg_htons(1)) MG_DEBUG(("ignoring > 1 answers"));
     mg_dns_parse_name(c->recv.buf, c->recv.len, 12, name, sizeof(name));
-    name_len = (uint8_t) strlen(name);  // verify it ends in .local
+    name_len = (uint8_t) strlen(name);
     MG_VERBOSE(("RR %u %u %s", (unsigned int) rr.atype,
                 (unsigned int) rr.aclass, name));
     if (rr.alen == 4 && rr.atype == MG_DNS_RTYPE_A &&
@@ -721,10 +747,46 @@ static void handle_mdns_record(struct mg_connection *c) {
 }
 
 static void mdns_cb(struct mg_connection *c, int ev, void *ev_data) {
-  if (ev == MG_EV_READ) {
-    handle_mdns_record(c);
+  struct mdns_data *d, *tmp;
+  struct mdns_data **head = (struct mdns_data **) &c->mgr->active_mdns_requests;
+  // mDNS resolver
+  if (ev == MG_EV_POLL) {
+    uint64_t now = *(uint64_t *) ev_data;
+    for (d = *head; d != NULL; d = tmp) {
+      tmp = d->next;
+      // MG_DEBUG(("%lu %lu mdns poll", d->expire, now));
+      if (now > d->expire) mg_error(d->c, "mDNS timeout");  // will remove entry
+    }
+  } else if (ev == MG_EV_CLOSE) {
+    for (d = *head; d != NULL; d = tmp) {
+      tmp = d->next;
+      mg_error(d->c, "mDNS listener error");  // this will remove entry
+    }
+  } else if (ev == MG_EV_MDNS_RESP) {
+    struct mg_mdns_resp *resp = (struct mg_mdns_resp *) ev_data;
+    if (resp->rr->atype == MG_DNS_RTYPE_A) {
+      for (d = *head; d != NULL; d = tmp) {
+        tmp = d->next;
+        if (mg_strcasecmp(d->name, resp->name) != 0) continue;
+        if (d->c->is_resolving) {
+          resp->addr.port = d->c->rem.port;  // Save port
+          d->c->rem = resp->addr;            // Copy resolved address
+          MG_DEBUG(("%lu %.*s is %M", d->c->id, resp->name.len, resp->name.buf,
+                    mg_print_ip, &d->c->rem));
+          mg_connect_resolved(d->c);
+        } else {
+          // this should not happen, unless above does not clear c->is_resolving
+          MG_ERROR(("%lu already resolved", d->c->id));
+        }
+        mdns_free(head, d);
+      }
+    }
+  } else if (ev == MG_EV_READ) {
+    // generic mDNS[-SD] handling
+    handle_mdns_record(c);  // this will call us back with MG_EV_MDNS_RESP
     mg_iobuf_del(&c->recv, 0, c->recv.len);
   }
+
   (void) ev_data;
 }
 
@@ -734,18 +796,48 @@ struct mg_connection *mg_mdns_listen(struct mg_mgr *mgr, mg_event_handler_t fn,
   struct mg_connection *c =
       mg_listen(mgr, "udp://224.0.0.251:5353", fn, fn_data);
   if (c == NULL) return NULL;
+  c->mgr->mdns = c;  // Add mDNS entry to enable resolver to use it
   c->pfn = mdns_cb, c->pfn_data = fn_data;
   mg_multicast_add(c, (char *) "224.0.0.251");
   return c;
+}
+
+static bool mdns_query(struct mg_connection *c, struct mg_str *name,
+                       unsigned int rtype) {
+  mg_multicast_restore(c, (uint8_t *) &c->loc);
+  (void) rtype;
+  return mg_dns_send(c, name, 0, false);
 }
 
 bool mg_mdns_query(struct mg_connection *c, const char *name,
                    unsigned int rtype) {
   struct mg_str name_;
   name_.buf = (char *) name, name_.len = strlen(name);
-  mg_multicast_restore(c, (uint8_t *) &c->loc);
-  (void) rtype;
-  return mg_dns_send(c, &name_, 0, false);
+  return mdns_query(c, &name_, rtype);
+}
+
+static void sendmdnsreq(struct mg_connection *c, struct mg_str *name, int ms,
+                        struct mg_connection *mdnsc, bool ipv6) {
+  struct mdns_data *d = NULL;
+  if (mdnsc == NULL) {
+    mg_error(c, "no mDNS listener, see mg_mdns_listen()");
+  } else if ((d = (struct mdns_data *) mg_calloc(1, sizeof(*d))) == NULL) {
+    mg_error(c, "resolve OOM");
+  } else {
+    struct mdns_data *reqs = (struct mdns_data *) c->mgr->active_mdns_requests;
+    d->next = reqs;
+    c->mgr->active_mdns_requests = d;
+    d->expire = mg_millis() + (uint64_t) ms;
+    d->name = mg_strdup(*name);
+    d->c = c;
+    c->is_resolving = 1;
+    MG_VERBOSE(
+        ("%lu resolving %.*s via mDNS", c->id, (int) name->len, name->buf));
+    if (!mdns_query(mdnsc, name, MG_DNS_RTYPE_A)) {
+      mg_error(c, "mDNS send");  // will remove newly created entry
+    }
+  }
+  (void) ipv6;
 }
 
 #ifdef MG_ENABLE_LINES
@@ -3250,38 +3342,42 @@ bool mg_json_get_bool(struct mg_str json, const char *path, bool *v) {
   return found;
 }
 
-bool mg_json_unescape(struct mg_str s, char *to, size_t n) {
-  size_t i, j;
-  for (i = 0, j = 0; i < s.len && j < n; i++, j++) {
-    if (s.buf[i] == '\\' && i + 5 < s.len && s.buf[i + 1] == 'u') {
-      //  \uXXXX escape. We process simple one-byte chars \u00xx within ASCII
-      //  range. More complex chars would require dragging in a UTF8 library,
-      //  which is too much for us
-      if (mg_str_to_num(mg_str_n(s.buf + i + 2, 4), 16, &to[j],
-                        sizeof(uint8_t)) == false)
-        return false;
-      i += 5;
-    } else if (s.buf[i] == '\\' && i + 1 < s.len) {
-      char c = json_esc(s.buf[i + 1], 0);
-      if (c == 0) return false;
-      to[j] = c;
-      i++;
-    } else {
-      to[j] = s.buf[i];
+size_t mg_json_unescape(struct mg_str json, const char *path, char *to,
+                        size_t n) {
+  struct mg_str s = mg_json_get_tok(json, path);
+  size_t res = 0, i, j;
+  if (s.len > 1 && s.buf[0] == '"') {  // Is is a string?
+    s.len -= 2, s.buf++;               // Trim surrounding double-quotes
+    for (i = 0, j = 0; i < s.len && j < n; i++, j++) {
+      if (s.buf[i] == '\\' && i + 5 < s.len && s.buf[i + 1] == 'u') {
+        //  \uXXXX escape. We process simple one-byte chars \u00xx within ASCII
+        //  range. More complex chars would require dragging in a UTF8 library,
+        //  which is too much for us
+        if (mg_str_to_num(mg_str_n(s.buf + i + 2, 4), 16, &to[j],
+                          sizeof(uint8_t)) == false)
+          break;
+        i += 5;
+      } else if (s.buf[i] == '\\' && i + 1 < s.len) {
+        char c = json_esc(s.buf[i + 1], 0);
+        if (c == 0) return false;
+        to[j] = c;
+        i++;
+      } else {
+        to[j] = s.buf[i];
+      }
     }
+    if (j < n) res = j;
+    if (n > 0) to[j < n ? j : n - 1] = '\0';
   }
-  if (j >= n) return false;
-  if (n > 0) to[j] = '\0';
-  return true;
+  return res;
 }
 
 char *mg_json_get_str(struct mg_str json, const char *path) {
   char *result = NULL;
   int len = 0, off = mg_json_get(json, path, &len);
-  if (off >= 0 && len > 1 && json.buf[off] == '"') {
+  if (off >= 0 && len > 2 && json.buf[off] == '"') {
     if ((result = (char *) mg_calloc(1, (size_t) len)) != NULL &&
-        !mg_json_unescape(mg_str_n(json.buf + off + 1, (size_t) (len - 2)),
-                          result, (size_t) len)) {
+        mg_json_unescape(json, path, result, (size_t) len) == 0) {
       mg_free(result);
       result = NULL;
     }
@@ -8016,6 +8112,212 @@ void mg_tcpip_mapip(struct mg_connection *c, struct mg_addr *ip) {
 }
 
 #endif  // MG_ENABLE_TCPIP
+
+#ifdef MG_ENABLE_LINES
+#line 1 "src/ota.c"
+#endif
+
+
+
+
+#if MG_OTA != MG_OTA_NONE
+
+enum { MG_OTA_STATUS_WAITING, MG_OTA_STATUS_SUCCESS, MG_OTA_STATUS_FAIL };
+static int s_version_status;
+static int s_ota_status;
+static uint64_t s_start_time;
+
+static struct mg_ota_metadata {
+  char *version;
+  char *url;
+  size_t size;
+  uint8_t sha256[32];
+} s_ota_metadata;
+
+static void free_ota_metadata(void) {
+  if (s_ota_metadata.version) mg_free(s_ota_metadata.version);
+  if (s_ota_metadata.url) mg_free(s_ota_metadata.url);
+  memset(&s_ota_metadata, 0, sizeof(s_ota_metadata));
+}
+
+static int fetch_ota_metadata(struct mg_http_message *response) {
+  double result;
+  if (mg_http_status(response) != 200) goto fetch_failed;
+  if (mg_json_get(response->body, "$", NULL) != 0) goto fetch_failed;
+  free_ota_metadata();
+  s_ota_metadata.version = mg_json_get_str(response->body, "$.version");
+  if (s_ota_metadata.version == NULL) goto fetch_failed;
+  s_ota_metadata.url = mg_json_get_str(response->body, "$.url");
+  if (s_ota_metadata.url == NULL) goto fetch_failed;
+  if (!mg_json_get_num(response->body, "$.size", &result) || result <= 0)
+    goto fetch_failed;
+  s_ota_metadata.size = (size_t) result;
+  // TODO (robertc2000): parse and validate sha256
+  MG_DEBUG(("Firmware version: %s, url: %s, size: %ld", s_ota_metadata.version,
+            s_ota_metadata.url, s_ota_metadata.size));
+  return MG_OTA_STATUS_SUCCESS;
+fetch_failed:
+  free_ota_metadata();
+  return MG_OTA_STATUS_FAIL;
+}
+
+static void s_version_fn(struct mg_connection *c, int ev, void *ev_data) {
+  struct mg_str host = mg_url_host((char *) c->fn_data);
+  struct mg_http_message *hm;
+  static int fetch_status;
+
+  if (ev == MG_EV_POLL) {
+    if (s_start_time + 5 * 1000 < mg_millis()) {
+      mg_error(c, "Connection timeout");
+    }
+  } else if (ev == MG_EV_CONNECT) {
+    mg_printf(c,
+              "GET %s HTTP/1.1\r\n"
+              "Host: %.*s\r\n"
+              "Connection: close\r\n\r\n",
+              mg_url_uri((char *) c->fn_data), (int) host.len, host.buf);
+    fetch_status = MG_OTA_STATUS_WAITING;
+  } else if (ev == MG_EV_HTTP_MSG) {
+    hm = (struct mg_http_message *) ev_data;
+    fetch_status = fetch_ota_metadata(hm);
+  } else if (ev == MG_EV_ERROR) {
+    MG_ERROR(("%lu Connection error", c->id));
+    s_version_status = MG_OTA_STATUS_FAIL;
+  } else if (ev == MG_EV_CLOSE) {
+    MG_DEBUG(("%lu Connection closed %lu", c->id, mg_millis() - s_start_time));
+    s_version_status = fetch_status;
+  }
+}
+
+static void s_firmware_fn(struct mg_connection *c, int ev, void *ev_data) {
+  struct mg_str host = mg_url_host(s_ota_metadata.url);
+  struct mg_http_message hm;
+  static size_t ofs = 0;
+  static bool ota_begun = false;
+  size_t alignment = 512, drop, len;
+  int n, status;
+  char *buf;
+  (void) ev_data;
+
+  if (ev == MG_EV_POLL) {
+    if (s_start_time + 120 * 1000 < mg_millis()) {
+      mg_error(c, "Connection timeout");
+    }
+  } else if (ev == MG_EV_CONNECT) {
+    mg_printf(c,
+              "GET %s HTTP/1.1\r\n"
+              "Host: %.*s\r\n"
+              "Connection: close\r\n\r\n",
+              mg_url_uri(s_ota_metadata.url), (int) host.len, host.buf);
+    ofs = 0;
+    ota_begun = false;
+  } else if (ev == MG_EV_READ) {
+    if (s_ota_status == MG_OTA_STATUS_FAIL) return;
+    if (!ota_begun) {  // First chunk, parse headers, OTA begin
+      n = mg_http_parse((char *) c->recv.buf, c->recv.len, &hm);
+      if (n < 0) {
+        mg_error(c, "Bad HTTP response");
+        return;
+      }
+      if (n == 0) return;
+      status = mg_http_status(&hm);
+      if (status != 200 || hm.body.len != s_ota_metadata.size) {
+        mg_error(c, "Bad HTTP response (%d), body length: %lu", status,
+                 hm.body.len);
+        return;
+      }
+      MG_DEBUG(("Beginning OTA (%ld bytes)", s_ota_metadata.size));
+      if (!mg_ota_begin(s_ota_metadata.size)) {
+        s_ota_status = MG_OTA_STATUS_FAIL;
+        mg_error(c, "mg_ota_begin(%lu) failed",
+                 (unsigned long) s_ota_metadata.size);
+        return;
+      }
+      ota_begun = true;
+      len = c->recv.len - (size_t) n;
+      buf = (char *) c->recv.buf + n;
+      drop = (size_t) n;
+    } else {  // Header parsed, incoming chunks
+      len = c->recv.len;
+      buf = (char *) c->recv.buf;
+      drop = 0;
+    }
+    // OTA write
+    size_t aligned = (ofs + len < s_ota_metadata.size)
+                         ? aligned = MG_ROUND_DOWN(len, alignment)
+                         : len;
+    if (aligned == 0) return;
+    if (!mg_ota_write(buf, aligned)) {
+      mg_error(c, "mg_ota_write(%lu) @%lu failed", (unsigned long) aligned,
+               (unsigned long) ofs);
+      return;
+    }
+    ofs += aligned;
+    mg_iobuf_del(&c->recv, 0, aligned + drop);
+    MG_DEBUG(("Wrote %lu/%lu bytes", (unsigned long) ofs,
+              (unsigned long) s_ota_metadata.size));
+  } else if (ev == MG_EV_ERROR) {
+    MG_ERROR(("%lu Connection error", c->id));
+    s_ota_status = MG_OTA_STATUS_FAIL;
+  } else if (ev == MG_EV_CLOSE) {  // OTA end
+    MG_DEBUG(("Connection closing, downloaded %ld/%ld bytes", ofs,
+              s_ota_metadata.size));
+    if (s_ota_status != MG_OTA_STATUS_FAIL && ota_begun) {
+      if (ofs != s_ota_metadata.size) {
+        s_ota_status = MG_OTA_STATUS_FAIL;
+        MG_ERROR(("Firmware size mismatch: got %lu expected %lu",
+                  (unsigned long) ofs, (unsigned long) s_ota_metadata.size));
+      } else if (!mg_ota_end()) {
+        s_ota_status = MG_OTA_STATUS_FAIL;
+        MG_ERROR(("mg_ota_end() failed"));
+      } else {
+        MG_DEBUG(("mg_ota_end() successful"));
+        s_ota_status = MG_OTA_STATUS_SUCCESS;
+      }
+    }
+    ota_begun = false;
+    ofs = 0;
+  }
+}
+
+void mg_ota_url_check(struct mg_mgr *mgr, const char *current_version,
+                      const char *metadata_url,
+                      void (*fn)(const char *status)) {
+  s_version_status = MG_OTA_STATUS_WAITING;
+  s_ota_status = MG_OTA_STATUS_WAITING;
+  s_start_time = mg_millis();
+  MG_DEBUG(("Connecting to %s to retrieve metadata", metadata_url));
+  if (!mg_http_connect(mgr, metadata_url, s_version_fn,
+                       (void *) metadata_url)) {
+    if (fn) fn("Failed to connect");
+    return;
+  }
+  while (s_version_status == MG_OTA_STATUS_WAITING) mg_mgr_poll(mgr, 10);
+  if (s_version_status == MG_OTA_STATUS_SUCCESS) {
+    if (strcmp(s_ota_metadata.version, current_version) == 0) {
+      if (fn) fn("Same version");
+      free_ota_metadata();
+      return;
+    }
+  } else {
+    if (fn) fn("Version retrieving error");
+    free_ota_metadata();
+    return;
+  }
+  if (fn) fn("Pulling firmware");
+  s_start_time = mg_millis();
+  MG_DEBUG(("Connecting to %s to download firmware", s_ota_metadata.url));
+  if (!mg_connect(mgr, s_ota_metadata.url, s_firmware_fn, NULL)) {
+    if (fn) fn("Failed to connect");
+    free_ota_metadata();
+    return;
+  }
+  while (s_ota_status == MG_OTA_STATUS_WAITING) mg_mgr_poll(mgr, 10);
+  if (s_ota_status == MG_OTA_STATUS_FAIL && fn) fn("OTA fail");
+  free_ota_metadata();
+}
+
+#endif
 
 #ifdef MG_ENABLE_LINES
 #line 1 "src/ota_ch32v307.c"

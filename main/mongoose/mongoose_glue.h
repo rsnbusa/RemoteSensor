@@ -87,11 +87,11 @@ void mongoose_set_wifi_handlers(struct mongoose_wifi_handlers *);
 
 struct mongoose_ota_settings {
   const char *current_version;
-  const char *version_url;
-  const char *firmware_url;
+  const char *metadata_url;
   int interval_seconds;
   char *status_buffer;
   size_t status_buffer_size;
+  void (*fn)(const char *);
 };
 void mongoose_enable_ota_url_checks(struct mongoose_ota_settings *settings);
 
@@ -117,6 +117,7 @@ void glue_update_state(void);
 // Firmware Glue
 
 struct Sensors {
+  char farmname[20];
   double batLowLevel;
   char mqttpassw[12];
   char mqttssid[60];
