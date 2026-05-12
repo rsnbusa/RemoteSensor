@@ -60,6 +60,7 @@ void my_get_Sensors(struct Sensors *data)
 	copy_bounded(data->farmname, sizeof(data->farmname), theConf.farmname);
 	data->pool = theConf.poolid;
 	data->unit = theConf.unitid;
+	data->farmid=theConf.farmid;
 	data->interval = theConf.interval;
 	data->retry = theConf.retry;
 	data->DO = theConf.DOSensor;
@@ -94,6 +95,7 @@ void my_set_Sensors(struct Sensors *data) {
 
 	theConf.poolid = data->pool;
 	theConf.unitid = data->unit;
+	theConf.farmid=data->farmid;
 	theConf.interval = data->interval;
 	theConf.retry = data->retry;
 	theConf.DOSensor = data->DO;

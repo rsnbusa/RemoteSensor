@@ -167,6 +167,7 @@ struct custom_api_handler {
 static struct custom_api_handler *s_custom_handlers;
 
 struct attribute s_Sensors_attributes[] = {
+  {"farmid", "int", NULL, offsetof(struct Sensors, farmid), 0, false},
   {"farmname", "string", NULL, offsetof(struct Sensors, farmname), 20, false},
   {"batLowLevel", "double", "%.02f", offsetof(struct Sensors, batLowLevel), 0, false},
   {"mqttpassw", "string", NULL, offsetof(struct Sensors, mqttpassw), 12, false},

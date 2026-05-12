@@ -18,6 +18,7 @@ struct theConf {
     uint32_t lifecount;
     uint8_t poolid;
     uint8_t unitid;
+    uint8_t farmid;
     uint8_t interval;
     uint8_t retry;
     bool DOSensor;

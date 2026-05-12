@@ -34,7 +34,7 @@ static const struct theConf kDefaultConf = {
     .batLowLevel = LOW_BATTERY_THRESHOLD,
     .sentinel = 0xDEADBEEF,
 };
-char STA_SSID[40],AP_SSID[40];
+char STA_SSID[60],AP_SSID[60];
 static const char *TAG = "RemoteSensors";
 
 uint32_t DEEP_SLEEP_MS=60000; // default 1 minute, can be updated by configuration
@@ -45,11 +45,13 @@ static TaskHandle_t s_ap_blink_task = NULL;
 static TaskHandle_t s_web_task = NULL;
 static TaskHandle_t s_rs485_task = NULL;
 static TaskHandle_t s_adc_task = NULL;
+static TaskHandle_t s_mqtt_sta_fail_task = NULL;
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
 static adc_cali_handle_t s_adc1_cali_handle = NULL;
 static bool s_adc1_cali_enabled = false;
 static const adc_atten_t s_adc_atten = ADC_ATTEN_DB_2_5;
 static bool s_ap_client_connected = false;
+static bool s_mqtt_sta_fail_handling = false;
 static RTC_DATA_ATTR float s_do_value_rtc = 0.0f;
 static RTC_DATA_ATTR int s_count = 0;
 static RTC_DATA_ATTR int s_retry_count = 0;
@@ -75,6 +77,7 @@ static const uint16_t kSalinitySensorStartReg = 0x2000;
 static const uint16_t kSensorRegCount = 0x0006;
 extern void sensor_webserver(void *pArg);
 static void ap_assigned_ip_blink_task(void *pvParameters);
+static void mqtt_sta_fail_blink_task(void *pvParameters);
 
 static const char *NVS_NS_CFG = "appcfg";
 static const char *NVS_KEY_THECONF = "theConf";
@@ -811,8 +814,8 @@ static float get_do_value_to_send(void)
 static bool build_telemetry_json(float do_level, char *json_out, size_t json_out_size)
 {
     int written = snprintf(json_out, json_out_size,
-                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f,\"Raw\":%d}]}",
-                           (unsigned)theConf.poolid, (unsigned)theConf.unitid,
+                           "{\"cmdarr\":[{\"cmd\":\"DOEX\",\"poolid\":%u,\"unitid\":%u,\"farmid\":%u,\"DOLevel\":%.2f,\"DOCount\":%d,\"DOretry\":%d,\"PHLevel\":%.2f,\"IRLevel\":%.2f,\"SALevel\":%.2f,\"WaterTemp\":%.2f,\"Interval\":%d,\"SOC\":%.2f,\"batVolts\":%.2f,\"Raw\":%d}]}",
+                           (unsigned)theConf.poolid, (unsigned)theConf.unitid, (unsigned)theConf.farmid,
                            (double)do_level, s_count, s_retry_count,
                            (double)theConf.PHLevel,
                            (double)theConf.IRLevel,
@@ -1045,9 +1048,10 @@ static void handle_mqtt_cmd_payload(const char *topic, int topic_len, const char
 static bool build_low_battery_alarm_json(char *json_out, size_t json_out_size)
 {
     int written = snprintf(json_out, json_out_size,
-                           "{\"poolid\":%u,\"unitid\":%u,\"voltage\":%.2f}",
+                           "{\"poolid\":%u,\"unitid\":%u,\"farmid\":%u,\"voltage\":%.2f}",
                            (unsigned)theConf.poolid,
                            (unsigned)theConf.unitid,
+                           (unsigned)theConf.farmid,
                            (double)BAT_VOLTS);
     return written > 0 && (size_t)written < json_out_size;
 }
@@ -1246,6 +1250,26 @@ static void ap_assigned_ip_blink_task(void *pvParameters)
     }
 }
 
+static void mqtt_sta_fail_blink_task(void *pvParameters)
+{
+    (void)pvParameters;
+    const TickType_t start_tick = xTaskGetTickCount();
+    const TickType_t blink_window = pdMS_TO_TICKS(20000);
+    int level = 0;
+
+    ESP_LOGW(TAG, "MQTT STA unavailable: fast-blinking NTW for 20s before sleep");
+    while ((xTaskGetTickCount() - start_tick) < blink_window) {
+        level = !level;
+        gpio_set_level(NTW, level);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    gpio_set_level(NTW, 0);
+    enter_deep_sleep("MQTT_STA", DEEP_SLEEP_MS_WIFI);
+    s_mqtt_sta_fail_task = NULL;
+    vTaskDelete(NULL);
+}
+
 static void collect_do_sample_until_ready(void)
 {
     uint8_t rs485_response[UART485_RX_BUF_SIZE] = {0};
@@ -1365,9 +1389,20 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             if (confFlag) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
             } else {
-                ESP_LOGI(TAG, "STA disconnected, reconnecting...");
-                enter_deep_sleep("WiFi",DEEP_SLEEP_MS_WIFI);         // better save energy when wifi is not available, instead of retrying every 10 seconds
-                esp_wifi_connect();
+                if (s_transport_mode == MESSAGE_TRANSPORT_MQTT) {
+                    if (!s_mqtt_sta_fail_handling) {
+                        s_mqtt_sta_fail_handling = true;
+                        ESP_LOGW(TAG, "STA disconnected in MQTT mode; scheduling fast blink then sleep");
+                        if (!start_task_once(&mqtt_sta_fail_blink_task, "MQTTFail", 2048, 4, &s_mqtt_sta_fail_task)) {
+                            ESP_LOGE(TAG, "Failed to create MQTT STA fail blink task; sleeping now");
+                            enter_deep_sleep("MQTT_STA", DEEP_SLEEP_MS_WIFI);
+                        }
+                    }
+                } else {
+                    ESP_LOGI(TAG, "STA disconnected, reconnecting...");
+                    enter_deep_sleep("WiFi",DEEP_SLEEP_MS_WIFI);         // better save energy when wifi is not available, instead of retrying every 10 seconds
+                    esp_wifi_connect();
+                }
             }
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -1533,8 +1568,8 @@ void app_main(void)
     load_transport_mode_from_conf();
     ESP_LOGI(TAG, "Transport from theConf.conntype: %d (%s)",
              s_transport_mode, transport_mode_str(s_transport_mode));
-    printf("Configuration: poolid=%u unitid=%u interval=%u sec PHSensor=%d SalinitySensor=%d\n",
-             (unsigned)theConf.poolid, (unsigned)theConf.unitid, (unsigned)theConf.interval, theConf.PHLevel, theConf.SalinityLevel);
+    printf("Configuration:Farm: %s FarmID: %u poolid=%u unitid=%u interval=%u sec PHSensor=%d SalinitySensor=%d\n",
+             theConf.farmname,theConf.farmid, (unsigned)theConf.poolid, (unsigned)theConf.unitid, (unsigned)theConf.interval, theConf.PHLevel, theConf.SalinityLevel);
 
     if (s_theconf_invalid) {
         ESP_LOGW(TAG, "Invalid/legacy theConf detected, forcing AP-only configuration mode");
