@@ -1272,6 +1272,14 @@ static void mqtt_sta_fail_blink_task(void *pvParameters)
 
 static void collect_do_sample_until_ready(void)
 {
+    if (BAT_VOLTS < theConf.batLowLevel) {
+        ESP_LOGW(TAG,
+                 "Battery voltage %.2f V below low threshold %.2f V; skipping Modbus read and sleeping",
+                 BAT_VOLTS, theConf.batLowLevel);
+        enter_deep_sleep("BAT_LOW", DEEP_SLEEP_MS * theConf.interval);
+        return;
+    }
+
     uint8_t rs485_response[UART485_RX_BUF_SIZE] = {0};
     int retries = 0;
     int rs485_response_len = 0;
